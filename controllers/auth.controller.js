@@ -1,113 +1,227 @@
-const User = require('../model/User');
+const User = require('../models/User');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const dotenv = require('dotenv');
-const mongoose = require('mongoose'); // Add this import
+const mongoose = require('mongoose');
 
 dotenv.config();
 
-// Generate JWT Token
+// =====================================
+// HELPER FUNCTIONS
+// =====================================
+
+/**
+ * Generate JWT Token
+ * @param {Object} user - User object
+ * @returns {String} JWT token
+ */
 const generateToken = (user) => {
   return jwt.sign(
-    { id: user._id, role: user.role },
+    { 
+      id: user._id, 
+      role: user.role,
+      email: user.email 
+    },
     process.env.JWT_SECRET,
-    { expiresIn: '7d' }
+    { expiresIn: process.env.JWT_EXPIRE || '7d' }
   );
 };
 
-// @desc    Register user
-// @route   POST /api/v1/auth/register
+/**
+ * Validate email format
+ * @param {String} email - Email to validate
+ * @returns {Boolean} - Is valid email
+ */
+const isValidEmail = (email) => {
+  const emailRegex = /^\w+([\.-]?\w+)*@\w+([\.-]?\w+)*(\.\w{2,3})+$/;
+  return emailRegex.test(email);
+};
+
+/**
+ * Check database connection
+ * @returns {Object} - Connection status
+ */
+const checkDbConnection = () => {
+  const dbState = mongoose.connection.readyState;
+  const stateMap = {
+    0: 'Disconnected',
+    1: 'Connected',
+    2: 'Connecting',
+    3: 'Disconnecting'
+  };
+  
+  return {
+    isConnected: dbState === 1,
+    state: stateMap[dbState] || 'Unknown',
+    code: dbState
+  };
+};
+
+/**
+ * Send error response with optional debug info
+ * @param {Object} res - Response object
+ * @param {Number} status - HTTP status code
+ * @param {String} message - Error message
+ * @param {Object} error - Error object for debugging
+ */
+const sendErrorResponse = (res, status, message, error = null) => {
+  const response = {
+    success: false,
+    message
+  };
+
+  // Add debug info in development
+  if (process.env.NODE_ENV === 'development' && error) {
+    response.debug = {
+      name: error.name,
+      message: error.message,
+      stack: error.stack
+    };
+  }
+
+  return res.status(status).json(response);
+};
+
+// =====================================
+// AUTH MIDDLEWARE
+// =====================================
+
+/**
+ * Protect routes - Verify JWT token
+ * @param {Object} req - Request object
+ * @param {Object} res - Response object
+ * @param {Function} next - Next middleware
+ */
+const protect = async (req, res, next) => {
+  try {
+    let token;
+
+    // Check for token in headers
+    if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
+      token = req.headers.authorization.split(' ')[1];
+    }
+
+    // Check if token exists
+    if (!token) {
+      return sendErrorResponse(res, 401, 'Not authorized to access this route');
+    }
+
+    try {
+      // Verify token
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+      // Get user from token
+      const user = await User.findById(decoded.id).select('-password');
+
+      if (!user) {
+        return sendErrorResponse(res, 401, 'User not found');
+      }
+
+      // Check if user is active
+      if (user.isActive === false) {
+        return sendErrorResponse(res, 401, 'User account is deactivated');
+      }
+
+      // Attach user to request object
+      req.user = user;
+      next();
+    } catch (error) {
+      if (error.name === 'JsonWebTokenError') {
+        return sendErrorResponse(res, 401, 'Invalid token');
+      }
+      if (error.name === 'TokenExpiredError') {
+        return sendErrorResponse(res, 401, 'Token expired');
+      }
+      throw error;
+    }
+  } catch (error) {
+    return sendErrorResponse(res, 500, 'Server error during authentication', error);
+  }
+};
+
+/**
+ * Authorize roles - Restrict access to specific roles
+ * @param {...String} roles - Allowed roles
+ * @returns {Function} - Middleware function
+ */
+const authorize = (...roles) => {
+  return (req, res, next) => {
+    if (!req.user) {
+      return sendErrorResponse(res, 401, 'Not authorized');
+    }
+
+    if (!roles.includes(req.user.role)) {
+      return sendErrorResponse(res, 403, `User role ${req.user.role} is not authorized to access this route`);
+    }
+
+    next();
+  };
+};
+
+// =====================================
+// AUTH CONTROLLERS
+// =====================================
+
+/**
+ * @desc    Register user
+ * @route   POST /api/v1/auth/register
+ * @access  Public
+ */
 const register = async (req, res) => {
   try {
     console.log('=== REGISTRATION ATTEMPT ===');
     console.log('Request body:', JSON.stringify(req.body, null, 2));
-    console.log('Content-Type:', req.get('Content-Type'));
     
     const { name, email, password, role } = req.body;
 
     // Validate required fields
     if (!name || !email || !password) {
-      console.log('Missing required fields:', { 
-        name: !!name, 
-        email: !!email, 
-        password: !!password 
-      });
-      return res.status(400).json({ 
-        success: false,
-        message: 'Please provide all required fields: name, email, password' 
-      });
+      return sendErrorResponse(res, 400, 'Please provide all required fields: name, email, password');
     }
 
     // Validate email format
-    const emailRegex = /^\w+([\.-]?\w+)*@\w+([\.-]?\w+)*(\.\w{2,3})+$/;
-    if (!emailRegex.test(email)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Please provide a valid email address'
-      });
+    if (!isValidEmail(email)) {
+      return sendErrorResponse(res, 400, 'Please provide a valid email address');
     }
 
     // Validate password length
     if (password.length < 6) {
-      return res.status(400).json({
-        success: false,
-        message: 'Password must be at least 6 characters long'
-      });
+      return sendErrorResponse(res, 400, 'Password must be at least 6 characters long');
     }
 
-    // Check MongoDB connection
-    const dbState = mongoose.connection.readyState;
-    console.log('MongoDB connection state:', dbState);
-    console.log('MongoDB state meaning:', 
-      dbState === 0 ? 'Disconnected' :
-      dbState === 1 ? 'Connected' :
-      dbState === 2 ? 'Connecting' :
-      dbState === 3 ? 'Disconnecting' : 'Unknown'
-    );
+    // Validate role if provided
+    const validRoles = ['user', 'garage_owner', 'admin'];
+    if (role && !validRoles.includes(role)) {
+      return sendErrorResponse(res, 400, `Invalid role. Must be one of: ${validRoles.join(', ')}`);
+    }
 
-    if (dbState !== 1) {
-      return res.status(500).json({
-        success: false,
-        message: 'Database not connected'
-      });
+    // Check database connection
+    const dbStatus = checkDbConnection();
+    if (!dbStatus.isConnected) {
+      return sendErrorResponse(res, 500, 'Database not connected');
     }
 
     // Check if user exists
-    console.log('Checking if user exists with email:', email);
     const userExists = await User.findOne({ email });
     if (userExists) {
-      console.log('User already exists:', email);
-      return res.status(400).json({ 
-        success: false,
-        message: 'User already exists' 
-      });
+      return sendErrorResponse(res, 400, 'User already exists');
     }
 
     // Create user
-    console.log('Creating new user...');
     const userData = {
       name,
       email,
       password,
       role: role || 'user'
     };
-    console.log('User data (password hidden):', {
-      ...userData,
-      password: '[HIDDEN]'
-    });
 
     const user = new User(userData);
-    
-    // Save user (this triggers the pre-save hook)
-    console.log('Saving user to database...');
     const savedUser = await user.save();
-    console.log('User saved successfully. ID:', savedUser._id);
 
     // Generate token
-    console.log('Generating JWT token...');
     const token = generateToken(savedUser);
-    console.log('Token generated successfully');
 
+    // Send response
     res.status(201).json({
       success: true,
       message: 'User registered successfully',
@@ -120,18 +234,11 @@ const register = async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('=== REGISTRATION ERROR ===');
-    console.error('Error name:', error.name);
-    console.error('Error message:', error.message);
-    console.error('Error code:', error.code);
-    console.error('Error stack:', error.stack);
-    
-    // Handle duplicate key error (email already exists)
+    console.error('=== REGISTRATION ERROR ===', error);
+
+    // Handle duplicate key error
     if (error.code === 11000) {
-      return res.status(400).json({
-        success: false,
-        message: 'Email already exists'
-      });
+      return sendErrorResponse(res, 400, 'Email already exists');
     }
 
     // Handle validation errors
@@ -149,95 +256,56 @@ const register = async (req, res) => {
 
     // Handle MongoDB connection errors
     if (error.name === 'MongoNetworkError' || error.name === 'MongoTimeoutError') {
-      return res.status(500).json({
-        success: false,
-        message: 'Database connection error. Please try again later.'
-      });
+      return sendErrorResponse(res, 500, 'Database connection error. Please try again later.');
     }
 
-    // Handle JWT errors
-    if (error.name === 'JsonWebTokenError') {
-      return res.status(500).json({
-        success: false,
-        message: 'Token generation failed'
-      });
-    }
-
-    // Handle other errors
-    res.status(500).json({ 
-      success: false,
-      message: 'Server error during registration',
-      ...(process.env.NODE_ENV === 'development' && { 
-        debug: {
-          name: error.name,
-          message: error.message
-        }
-      })
-    });
+    sendErrorResponse(res, 500, 'Server error during registration', error);
   }
 };
 
-// @desc    Login user
-// @route   POST /api/v1/auth/login
+/**
+ * @desc    Login user
+ * @route   POST /api/v1/auth/login
+ * @access  Public
+ */
 const login = async (req, res) => {
   try {
     console.log('=== LOGIN ATTEMPT ===');
-    console.log('Request body:', { ...req.body, password: '[HIDDEN]' });
     
     const { email, password } = req.body;
     
     // Validate input
     if (!email || !password) {
-      console.log('Missing email or password');
-      return res.status(400).json({ 
-        success: false,
-        message: 'Please provide email and password' 
-      });
+      return sendErrorResponse(res, 400, 'Please provide email and password');
     }
 
-    // Check MongoDB connection
-    const dbState = mongoose.connection.readyState;
-    if (dbState !== 1) {
-      return res.status(500).json({
-        success: false,
-        message: 'Database not connected'
-      });
+    // Check database connection
+    const dbStatus = checkDbConnection();
+    if (!dbStatus.isConnected) {
+      return sendErrorResponse(res, 500, 'Database not connected');
     }
-
-    console.log('Finding user with email:', email);
 
     // Find user with password field
     const user = await User.findOne({ email }).select('+password');
     
     if (!user) {
-      console.log('User not found:', email);
-      return res.status(401).json({ 
-        success: false,
-        message: 'Invalid credentials' 
-      });
+      return sendErrorResponse(res, 401, 'Invalid credentials');
     }
 
-    console.log('User found, checking password...');
-    console.log('Stored password hash:', user.password ? '[HASHED]' : 'No password');
-    
     // Check password
     const isMatch = await user.matchPassword(password);
     
-    console.log('Password match result:', isMatch);
-    
     if (!isMatch) {
-      console.log('Password mismatch for user:', email);
-      return res.status(401).json({ 
-        success: false,
-        message: 'Invalid credentials' 
-      });
+      return sendErrorResponse(res, 401, 'Invalid credentials');
+    }
+
+    // Check if user is active
+    if (user.isActive === false) {
+      return sendErrorResponse(res, 401, 'Your account has been deactivated. Please contact support.');
     }
 
     // Generate token
-    console.log('Generating token for user:', user._id);
     const token = generateToken(user);
-
-    console.log('Login successful for:', email);
 
     res.status(200).json({
       success: true,
@@ -251,44 +319,28 @@ const login = async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('=== LOGIN ERROR ===');
-    console.error('Error name:', error.name);
-    console.error('Error message:', error.message);
-    console.error('Error stack:', error.stack);
-    
-    res.status(500).json({ 
-      success: false,
-      message: 'Server error during login',
-      ...(process.env.NODE_ENV === 'development' && { 
-        debug: error.message 
-      })
-    });
+    console.error('=== LOGIN ERROR ===', error);
+    sendErrorResponse(res, 500, 'Server error during login', error);
   }
 };
 
-// @desc    Forgot password
-// @route   POST /api/v1/auth/forgot-password
+/**
+ * @desc    Forgot password
+ * @route   POST /api/v1/auth/forgot-password
+ * @access  Public
+ */
 const forgotPassword = async (req, res) => {
   try {
-    console.log('=== FORGOT PASSWORD ATTEMPT ===');
-    console.log('Request body:', req.body);
-    
     const { email } = req.body;
 
     if (!email) {
-      return res.status(400).json({
-        success: false,
-        message: 'Please provide email address'
-      });
+      return sendErrorResponse(res, 400, 'Please provide email address');
     }
 
     const user = await User.findOne({ email });
+    
     if (!user) {
-      console.log('User not found for password reset:', email);
-      return res.status(404).json({ 
-        success: false,
-        message: 'User not found' 
-      });
+      return sendErrorResponse(res, 404, 'User not found');
     }
 
     // Generate reset token
@@ -299,46 +351,37 @@ const forgotPassword = async (req, res) => {
     user.resetPasswordExpire = Date.now() + 10 * 60 * 1000; // 10 minutes
     await user.save();
 
+    // TODO: Send email with reset token
     console.log('Password reset token generated for:', email);
 
     res.status(200).json({
       success: true,
       message: 'Password reset token generated',
       data: {
-        resetToken // In production, you would email this token
+        resetToken // In production, remove this and send via email
       }
     });
   } catch (error) {
-    console.error('=== FORGOT PASSWORD ERROR ===');
-    console.error('Error:', error);
-    res.status(500).json({ 
-      success: false,
-      message: 'Server error' 
-    });
+    console.error('=== FORGOT PASSWORD ERROR ===', error);
+    sendErrorResponse(res, 500, 'Server error during password reset request', error);
   }
 };
 
-// @desc    Reset password
-// @route   POST /api/v1/auth/reset-password
+/**
+ * @desc    Reset password
+ * @route   POST /api/v1/auth/reset-password
+ * @access  Public
+ */
 const resetPassword = async (req, res) => {
   try {
-    console.log('=== RESET PASSWORD ATTEMPT ===');
-    console.log('Request body:', { ...req.body, password: '[HIDDEN]' });
-    
     const { token, password } = req.body;
 
     if (!token || !password) {
-      return res.status(400).json({ 
-        success: false,
-        message: 'Token and new password are required' 
-      });
+      return sendErrorResponse(res, 400, 'Token and new password are required');
     }
 
     if (password.length < 6) {
-      return res.status(400).json({
-        success: false,
-        message: 'Password must be at least 6 characters long'
-      });
+      return sendErrorResponse(res, 400, 'Password must be at least 6 characters long');
     }
 
     // Hash the token from request
@@ -351,14 +394,8 @@ const resetPassword = async (req, res) => {
     });
 
     if (!user) {
-      console.log('Invalid or expired token used');
-      return res.status(400).json({ 
-        success: false,
-        message: 'Invalid or expired token' 
-      });
+      return sendErrorResponse(res, 400, 'Invalid or expired token');
     }
-
-    console.log('User found for password reset:', user.email);
 
     // Set new password
     user.password = password;
@@ -367,25 +404,139 @@ const resetPassword = async (req, res) => {
 
     await user.save();
 
-    console.log('Password reset successful for:', user.email);
-
     res.status(200).json({ 
       success: true,
       message: 'Password reset successfully' 
     });
   } catch (error) {
-    console.error('=== RESET PASSWORD ERROR ===');
-    console.error('Error:', error);
-    res.status(500).json({ 
-      success: false,
-      message: 'Server error' 
-    });
+    console.error('=== RESET PASSWORD ERROR ===', error);
+    sendErrorResponse(res, 500, 'Server error during password reset', error);
   }
 };
 
+/**
+ * @desc    Get current user profile
+ * @route   GET /api/v1/auth/me
+ * @access  Private
+ */
+const getMe = async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id).select('-password');
+    
+    res.status(200).json({
+      success: true,
+      data: user
+    });
+  } catch (error) {
+    console.error('=== GET PROFILE ERROR ===', error);
+    sendErrorResponse(res, 500, 'Server error while fetching profile', error);
+  }
+};
+
+/**
+ * @desc    Update user profile
+ * @route   PUT /api/v1/auth/updatedetails
+ * @access  Private
+ */
+const updateDetails = async (req, res) => {
+  try {
+    const fieldsToUpdate = {
+      name: req.body.name,
+      email: req.body.email
+    };
+
+    // Remove undefined fields
+    Object.keys(fieldsToUpdate).forEach(key => 
+      fieldsToUpdate[key] === undefined && delete fieldsToUpdate[key]
+    );
+
+    const user = await User.findByIdAndUpdate(req.user.id, fieldsToUpdate, {
+      new: true,
+      runValidators: true
+    }).select('-password');
+
+    res.status(200).json({
+      success: true,
+      data: user
+    });
+  } catch (error) {
+    console.error('=== UPDATE PROFILE ERROR ===', error);
+    sendErrorResponse(res, 500, 'Server error while updating profile', error);
+  }
+};
+
+/**
+ * @desc    Update password
+ * @route   PUT /api/v1/auth/updatepassword
+ * @access  Private
+ */
+const updatePassword = async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+
+    if (!currentPassword || !newPassword) {
+      return sendErrorResponse(res, 400, 'Please provide current and new password');
+    }
+
+    if (newPassword.length < 6) {
+      return sendErrorResponse(res, 400, 'New password must be at least 6 characters long');
+    }
+
+    // Get user with password
+    const user = await User.findById(req.user.id).select('+password');
+
+    // Check current password
+    const isMatch = await user.matchPassword(currentPassword);
+    if (!isMatch) {
+      return sendErrorResponse(res, 401, 'Current password is incorrect');
+    }
+
+    user.password = newPassword;
+    await user.save();
+
+    res.status(200).json({
+      success: true,
+      message: 'Password updated successfully'
+    });
+  } catch (error) {
+    console.error('=== UPDATE PASSWORD ERROR ===', error);
+    sendErrorResponse(res, 500, 'Server error while updating password', error);
+  }
+};
+
+/**
+ * @desc    Logout user / Clear cookie
+ * @route   GET /api/v1/auth/logout
+ * @access  Private
+ */
+const logout = async (req, res) => {
+  try {
+    res.status(200).json({
+      success: true,
+      message: 'Logged out successfully'
+    });
+  } catch (error) {
+    console.error('=== LOGOUT ERROR ===', error);
+    sendErrorResponse(res, 500, 'Server error during logout', error);
+  }
+};
+
+// =====================================
+// EXPORTS
+// =====================================
+
 module.exports = {
+  // Middleware
+  protect,
+  authorize,
+  
+  // Auth Controllers
   register,
   login,
   forgotPassword,
   resetPassword,
+  getMe,
+  updateDetails,
+  updatePassword,
+  logout
 };
