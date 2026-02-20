@@ -1,4 +1,38 @@
 const Garage = require('../models/garage');
+const Booking = require('../models/booking');
+
+/*
+=====================================
+HELPER FUNCTIONS
+=====================================
+*/
+
+/**
+ * Populate garage with related data
+ * @param {Object} query - Mongoose query
+ * @returns {Object} Populated query
+ */
+const populateGarageData = (query) => {
+  return query
+    .populate('owner', 'name email phone')
+    .populate({
+      path: 'bookings',
+      match: { isDeleted: false },
+      select: 'user appointmentDate status totalPrice services',
+      populate: {
+        path: 'user',
+        select: 'name email'
+      }
+    })
+    .populate({
+      path: 'reviews',
+      select: 'rating comment user createdAt',
+      populate: {
+        path: 'user',
+        select: 'name'
+      }
+    });
+};
 
 /*
 =====================================
@@ -12,9 +46,21 @@ exports.createGarage = async (req, res) => {
       owner: req.user._id
     });
 
-    res.status(201).json({ success: true, garage });
+    // Fetch populated garage
+    const populatedGarage = await populateGarageData(
+      Garage.findById(garage._id)
+    );
+
+    res.status(201).json({ 
+      success: true, 
+      message: 'Garage created successfully',
+      garage: populatedGarage 
+    });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    res.status(500).json({ 
+      success: false,
+      message: error.message 
+    });
   }
 };
 
@@ -25,14 +71,42 @@ GET ALL GARAGES (NOT DELETED)
 */
 exports.getGarages = async (req, res) => {
   try {
-    const garages = await Garage.find({ isDeleted: false }).populate(
-      'owner',
-      'name email phone'
+    let query = Garage.find({ isDeleted: false });
+
+    // Add filters from query params
+    if (req.query.city) {
+      query = query.where('address.city').equals(req.query.city);
+    }
+    if (req.query.isVerified) {
+      query = query.where('isVerified').equals(req.query.isVerified === 'true');
+    }
+    if (req.query.minRating) {
+      query = query.where('averageRating').gte(parseFloat(req.query.minRating));
+    }
+
+    // Pagination
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
+
+    const total = await Garage.countDocuments({ isDeleted: false });
+    const garages = await populateGarageData(
+      query.sort('-createdAt').skip(skip).limit(limit)
     );
 
-    res.status(200).json({ success: true, garages });
+    res.status(200).json({ 
+      success: true, 
+      count: garages.length,
+      total,
+      page,
+      pages: Math.ceil(total / limit),
+      garages 
+    });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    res.status(500).json({ 
+      success: false,
+      message: error.message 
+    });
   }
 };
 
@@ -43,8 +117,9 @@ GET ALL GARAGES (INCLUDING DELETED)
 */
 exports.getAllGaragesWithDeleted = async (req, res) => {
   try {
-    const garages = await Garage.find() // includes deleted
-      .populate('owner', 'name email phone');
+    const garages = await populateGarageData(
+      Garage.find().sort('-createdAt')
+    );
 
     res.status(200).json({
       success: true,
@@ -52,7 +127,10 @@ exports.getAllGaragesWithDeleted = async (req, res) => {
       garages
     });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    res.status(500).json({ 
+      success: false,
+      message: error.message 
+    });
   }
 };
 
@@ -63,18 +141,46 @@ GET SINGLE GARAGE
 */
 exports.getGarage = async (req, res) => {
   try {
-    const garage = await Garage.findOne({
-      _id: req.params.id,
-      isDeleted: false
-    }).populate('owner', 'name email phone');
+    const garage = await populateGarageData(
+      Garage.findOne({
+        _id: req.params.id,
+        isDeleted: false
+      })
+    );
 
     if (!garage) {
-      return res.status(404).json({ message: 'Garage not found' });
+      return res.status(404).json({ 
+        success: false,
+        message: 'Garage not found' 
+      });
     }
 
-    res.status(200).json({ success: true, garage });
+    // Get upcoming bookings count
+    const upcomingBookings = garage.bookings?.filter(
+      booking => new Date(booking.appointmentDate) > new Date() && 
+                 ['pending', 'confirmed'].includes(booking.status)
+    ).length || 0;
+
+    // Add stats to response
+    const garageWithStats = {
+      ...garage.toObject(),
+      stats: {
+        upcomingBookings,
+        totalBookings: garage.bookings?.length || 0,
+        averageRating: garage.averageRating,
+        totalReviews: garage.totalReviews
+      }
+    };
+
+    res.status(200).json({ 
+      success: true, 
+      garage: garageWithStats 
+    });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    res.status(500).json({ 
+      success: false,
+      message: error.message 
+    });
   }
 };
 
@@ -88,11 +194,18 @@ exports.updateGarage = async (req, res) => {
     let garage = await Garage.findById(req.params.id);
 
     if (!garage || garage.isDeleted) {
-      return res.status(404).json({ message: 'Garage not found' });
+      return res.status(404).json({ 
+        success: false,
+        message: 'Garage not found' 
+      });
     }
 
-    if (garage.owner.toString() !== req.user._id.toString()) {
-      return res.status(403).json({ message: 'Not authorized' });
+    // Check ownership (admin can update any garage)
+    if (garage.owner.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
+      return res.status(403).json({ 
+        success: false,
+        message: 'Not authorized to update this garage' 
+      });
     }
 
     garage = await Garage.findByIdAndUpdate(req.params.id, req.body, {
@@ -100,9 +213,20 @@ exports.updateGarage = async (req, res) => {
       runValidators: true
     });
 
-    res.status(200).json({ success: true, garage });
+    const updatedGarage = await populateGarageData(
+      Garage.findById(garage._id)
+    );
+
+    res.status(200).json({ 
+      success: true, 
+      message: 'Garage updated successfully',
+      garage: updatedGarage 
+    });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    res.status(500).json({ 
+      success: false,
+      message: error.message 
+    });
   }
 };
 
@@ -116,7 +240,24 @@ exports.softDeleteGarage = async (req, res) => {
     const garage = await Garage.findById(req.params.id);
 
     if (!garage) {
-      return res.status(404).json({ message: 'Garage not found' });
+      return res.status(404).json({ 
+        success: false,
+        message: 'Garage not found' 
+      });
+    }
+
+    // Check if garage has active bookings
+    const activeBookings = await Booking.findOne({
+      garage: req.params.id,
+      status: { $in: ['pending', 'confirmed', 'in_progress'] },
+      isDeleted: false
+    });
+
+    if (activeBookings) {
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot delete garage with active bookings. Please cancel or complete all bookings first.'
+      });
     }
 
     garage.isDeleted = true;
@@ -124,9 +265,25 @@ exports.softDeleteGarage = async (req, res) => {
 
     await garage.save();
 
-    res.status(200).json({ message: 'Garage soft deleted' });
+    // Soft delete all associated bookings
+    await Booking.updateMany(
+      { garage: req.params.id },
+      { 
+        isDeleted: true, 
+        deletedAt: new Date(),
+        status: 'cancelled'
+      }
+    );
+
+    res.status(200).json({ 
+      success: true,
+      message: 'Garage and associated bookings soft deleted' 
+    });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    res.status(500).json({ 
+      success: false,
+      message: error.message 
+    });
   }
 };
 
@@ -140,7 +297,10 @@ exports.restoreGarage = async (req, res) => {
     const garage = await Garage.findById(req.params.id);
 
     if (!garage) {
-      return res.status(404).json({ message: 'Garage not found' });
+      return res.status(404).json({ 
+        success: false,
+        message: 'Garage not found' 
+      });
     }
 
     garage.isDeleted = false;
@@ -148,9 +308,29 @@ exports.restoreGarage = async (req, res) => {
 
     await garage.save();
 
-    res.status(200).json({ message: 'Garage restored' });
+    // Restore associated non-permanently deleted bookings
+    await Booking.updateMany(
+      { 
+        garage: req.params.id,
+        isDeleted: true,
+        deletedAt: { $exists: true }
+      },
+      { 
+        isDeleted: false, 
+        deletedAt: null,
+        status: 'pending' // Reset to pending
+      }
+    );
+
+    res.status(200).json({ 
+      success: true,
+      message: 'Garage and associated bookings restored' 
+    });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    res.status(500).json({ 
+      success: false,
+      message: error.message 
+    });
   }
 };
 
@@ -161,10 +341,196 @@ HARD DELETE (PERMANENT)
 */
 exports.hardDeleteGarage = async (req, res) => {
   try {
+    const garage = await Garage.findById(req.params.id);
+
+    if (!garage) {
+      return res.status(404).json({ 
+        success: false,
+        message: 'Garage not found' 
+      });
+    }
+
+    // Check for any bookings
+    const hasBookings = await Booking.findOne({ garage: req.params.id });
+    
+    if (hasBookings) {
+      // Option 1: Prevent deletion if has bookings
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot permanently delete garage with booking history. Soft delete instead.'
+      });
+
+      // Option 2: Also delete all bookings (uncomment if you want this)
+      // await Booking.deleteMany({ garage: req.params.id });
+    }
+
     await Garage.findByIdAndDelete(req.params.id);
 
-    res.status(200).json({ message: 'Garage permanently deleted' });
+    res.status(200).json({ 
+      success: true,
+      message: 'Garage permanently deleted' 
+    });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    res.status(500).json({ 
+      success: false,
+      message: error.message 
+    });
+  }
+};
+
+/*
+=====================================
+GET GARAGE BOOKINGS
+=====================================
+*/
+exports.getGarageBookings = async (req, res) => {
+  try {
+    const garage = await Garage.findOne({
+      _id: req.params.id,
+      isDeleted: false
+    });
+
+    if (!garage) {
+      return res.status(404).json({ 
+        success: false,
+        message: 'Garage not found' 
+      });
+    }
+
+    // Check access (owner or admin)
+    if (garage.owner.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
+      return res.status(403).json({ 
+        success: false,
+        message: 'Not authorized to view these bookings' 
+      });
+    }
+
+    // Build query based on filters
+    let query = { 
+      garage: req.params.id,
+      isDeleted: false 
+    };
+
+    // Filter by status
+    if (req.query.status) {
+      query.status = req.query.status;
+    }
+
+    // Filter by date range
+    if (req.query.startDate || req.query.endDate) {
+      query.appointmentDate = {};
+      if (req.query.startDate) {
+        query.appointmentDate.$gte = new Date(req.query.startDate);
+      }
+      if (req.query.endDate) {
+        query.appointmentDate.$lte = new Date(req.query.endDate);
+      }
+    }
+
+    const bookings = await Booking.find(query)
+      .populate('user', 'name email phone')
+      .sort(req.query.sort || '-appointmentDate');
+
+    // Calculate stats
+    const stats = {
+      total: bookings.length,
+      pending: bookings.filter(b => b.status === 'pending').length,
+      confirmed: bookings.filter(b => b.status === 'confirmed').length,
+      completed: bookings.filter(b => b.status === 'completed').length,
+      cancelled: bookings.filter(b => b.status === 'cancelled').length,
+      totalRevenue: bookings
+        .filter(b => b.status === 'completed' && b.payment?.status === 'paid')
+        .reduce((sum, b) => sum + (b.totalPrice || 0), 0)
+    };
+
+    res.status(200).json({
+      success: true,
+      stats,
+      count: bookings.length,
+      bookings
+    });
+  } catch (error) {
+    res.status(500).json({ 
+      success: false,
+      message: error.message 
+    });
+  }
+};
+
+/*
+=====================================
+UPDATE GARAGE VERIFICATION STATUS
+=====================================
+*/
+exports.verifyGarage = async (req, res) => {
+  try {
+    const { verified } = req.body;
+    
+    const garage = await Garage.findById(req.params.id);
+
+    if (!garage || garage.isDeleted) {
+      return res.status(404).json({ 
+        success: false,
+        message: 'Garage not found' 
+      });
+    }
+
+    garage.isVerified = verified === true || verified === 'true';
+    await garage.save();
+
+    res.status(200).json({
+      success: true,
+      message: `Garage ${garage.isVerified ? 'verified' : 'unverified'} successfully`,
+      isVerified: garage.isVerified
+    });
+  } catch (error) {
+    res.status(500).json({ 
+      success: false,
+      message: error.message 
+    });
+  }
+};
+
+/*
+=====================================
+SEARCH GARAGES BY LOCATION
+=====================================
+*/
+exports.searchGaragesByLocation = async (req, res) => {
+  try {
+    const { lat, lng, radius = 10 } = req.query; // radius in km
+
+    if (!lat || !lng) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide latitude and longitude'
+      });
+    }
+
+    const garages = await populateGarageData(
+      Garage.find({
+        isDeleted: false,
+        location: {
+          $near: {
+            $geometry: {
+              type: 'Point',
+              coordinates: [parseFloat(lng), parseFloat(lat)]
+            },
+            $maxDistance: radius * 1000 // Convert km to meters
+          }
+        }
+      })
+    );
+
+    res.status(200).json({
+      success: true,
+      count: garages.length,
+      garages
+    });
+  } catch (error) {
+    res.status(500).json({ 
+      success: false,
+      message: error.message 
+    });
   }
 };
