@@ -94,13 +94,20 @@ exports.getGarages = async (req, res) => {
       query.sort('-createdAt').skip(skip).limit(limit)
     );
 
+    // Filter active services for each garage
+    const garagesWithActiveServices = garages.map(garage => {
+      const garageObj = garage.toObject();
+      garageObj.services = garage.services.filter(s => s.isActive !== false);
+      return garageObj;
+    });
+
     res.status(200).json({ 
       success: true, 
-      count: garages.length,
+      count: garagesWithActiveServices.length,
       total,
       page,
       pages: Math.ceil(total / limit),
-      garages 
+      garages: garagesWithActiveServices
     });
   } catch (error) {
     res.status(500).json({ 
@@ -121,10 +128,17 @@ exports.getAllGaragesWithDeleted = async (req, res) => {
       Garage.find().sort('-createdAt')
     );
 
+    // Filter active services for each garage
+    const garagesWithActiveServices = garages.map(garage => {
+      const garageObj = garage.toObject();
+      garageObj.services = garage.services.filter(s => s.isActive !== false);
+      return garageObj;
+    });
+
     res.status(200).json({
       success: true,
-      count: garages.length,
-      garages
+      count: garagesWithActiveServices.length,
+      garages: garagesWithActiveServices
     });
   } catch (error) {
     res.status(500).json({ 
@@ -155,15 +169,21 @@ exports.getGarage = async (req, res) => {
       });
     }
 
+    // Only active services
+    const activeServices = garage.services.filter(
+      (s) => s.isActive !== false
+    );
+
     // Get upcoming bookings count
     const upcomingBookings = garage.bookings?.filter(
       booking => new Date(booking.appointmentDate) > new Date() && 
                  ['pending', 'confirmed'].includes(booking.status)
     ).length || 0;
 
-    // Add stats to response
+    // Add stats to response with filtered services
     const garageWithStats = {
       ...garage.toObject(),
+      services: activeServices,
       stats: {
         upcomingBookings,
         totalBookings: garage.bookings?.length || 0,
@@ -232,7 +252,115 @@ exports.updateGarage = async (req, res) => {
 
 /*
 =====================================
-SOFT DELETE
+ADD SERVICE
+=====================================
+*/
+exports.addService = async (req, res) => {
+  try {
+    const garage = await Garage.findById(req.params.id);
+
+    if (!garage) {
+      return res.status(404).json({
+        success: false,
+        message: 'Garage not found'
+      });
+    }
+
+    garage.services.push(req.body);
+    await garage.save();
+
+    res.status(200).json({
+      success: true,
+      message: 'Service added successfully',
+      services: garage.services
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/*
+=====================================
+UPDATE SERVICE
+=====================================
+*/
+exports.updateService = async (req, res) => {
+  try {
+    const { serviceId } = req.params;
+
+    const garage = await Garage.findById(req.params.id);
+
+    if (!garage) {
+      return res.status(404).json({
+        success: false,
+        message: 'Garage not found'
+      });
+    }
+
+    const service = garage.services.id(serviceId);
+
+    if (!service) {
+      return res.status(404).json({
+        success: false,
+        message: 'Service not found'
+      });
+    }
+
+    Object.assign(service, req.body);
+    await garage.save();
+
+    res.status(200).json({
+      success: true,
+      message: 'Service updated successfully',
+      service
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/*
+=====================================
+DELETE SERVICE (Soft)
+=====================================
+*/
+exports.deleteService = async (req, res) => {
+  try {
+    const { serviceId } = req.params;
+
+    const garage = await Garage.findById(req.params.id);
+
+    if (!garage) {
+      return res.status(404).json({
+        success: false,
+        message: 'Garage not found'
+      });
+    }
+
+    const service = garage.services.id(serviceId);
+
+    if (!service) {
+      return res.status(404).json({
+        success: false,
+        message: 'Service not found'
+      });
+    }
+
+    service.isActive = false;
+    await garage.save();
+
+    res.status(200).json({
+      success: true,
+      message: 'Service deleted successfully'
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/*
+=====================================
+SOFT DELETE GARAGE
 =====================================
 */
 exports.softDeleteGarage = async (req, res) => {
@@ -354,14 +482,10 @@ exports.hardDeleteGarage = async (req, res) => {
     const hasBookings = await Booking.findOne({ garage: req.params.id });
     
     if (hasBookings) {
-      // Option 1: Prevent deletion if has bookings
       return res.status(400).json({
         success: false,
         message: 'Cannot permanently delete garage with booking history. Soft delete instead.'
       });
-
-      // Option 2: Also delete all bookings (uncomment if you want this)
-      // await Booking.deleteMany({ garage: req.params.id });
     }
 
     await Garage.findByIdAndDelete(req.params.id);
@@ -522,10 +646,17 @@ exports.searchGaragesByLocation = async (req, res) => {
       })
     );
 
+    // Filter active services for each garage
+    const garagesWithActiveServices = garages.map(garage => {
+      const garageObj = garage.toObject();
+      garageObj.services = garage.services.filter(s => s.isActive !== false);
+      return garageObj;
+    });
+
     res.status(200).json({
       success: true,
-      count: garages.length,
-      garages
+      count: garagesWithActiveServices.length,
+      garages: garagesWithActiveServices
     });
   } catch (error) {
     res.status(500).json({ 

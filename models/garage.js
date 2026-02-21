@@ -8,23 +8,28 @@ const garageSchema = new mongoose.Schema(
       required: true,
       index: true
     },
+
     name: {
       type: String,
       required: [true, 'Garage name is required'],
       trim: true
     },
+
+    description: {
+      type: String,
+      trim: true
+    },
+
     isDeleted: {
       type: Boolean,
       default: false,
       index: true
     },
+
     deletedAt: {
       type: Date
     },
-    description: {
-      type: String,
-      trim: true
-    },
+
     address: {
       street: { type: String, required: true },
       city: { type: String, required: true, index: true },
@@ -32,6 +37,7 @@ const garageSchema = new mongoose.Schema(
       country: { type: String, default: 'Ethiopia' },
       postalCode: { type: String }
     },
+
     location: {
       type: {
         type: String,
@@ -43,38 +49,68 @@ const garageSchema = new mongoose.Schema(
         required: true
       }
     },
+
     googlePlaceId: String,
     formattedAddress: String,
+
+    // =====================================
+    // ✅ SERVICES ADDED HERE
+    // =====================================
+    services: [
+      {
+        name: {
+          type: String,
+          required: true,
+          trim: true
+        },
+        description: {
+          type: String,
+          trim: true
+        },
+        price: {
+          type: Number,
+          required: true,
+          min: 0
+        },
+        duration: {
+          type: Number, // in minutes
+          required: true
+        },
+        isActive: {
+          type: Boolean,
+          default: true
+        }
+      }
+    ],
+
     averageRating: {
       type: Number,
       default: 0,
       min: 0,
       max: 5
     },
+
     totalReviews: {
       type: Number,
       default: 0
     },
+
     isActive: {
       type: Boolean,
       default: true
     },
+
     isVerified: {
       type: Boolean,
       default: false
     }
   },
-  { 
+  {
     timestamps: true,
-    // ADD THESE TWO LINES to enable virtuals
     toJSON: { virtuals: true },
     toObject: { virtuals: true }
   }
 );
-
-// =====================================
-// ADD THESE VIRTUAL FIELDS
-// =====================================
 
 // Virtual for bookings
 garageSchema.virtual('bookings', {
@@ -84,7 +120,7 @@ garageSchema.virtual('bookings', {
   options: { sort: { appointmentDate: -1 } }
 });
 
-// Virtual for reviews (if you have a Review model)
+// Virtual for reviews
 garageSchema.virtual('reviews', {
   ref: 'Review',
   localField: '_id',
@@ -92,7 +128,7 @@ garageSchema.virtual('reviews', {
   options: { sort: { createdAt: -1 } }
 });
 
-// Index for geospatial queries
+// Geospatial index
 garageSchema.index({ location: '2dsphere' });
 
 module.exports = mongoose.model('Garage', garageSchema);
