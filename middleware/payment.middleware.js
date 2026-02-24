@@ -417,22 +417,24 @@ const verifyChapaPayment = async (req, res, next) => {
 };
 
 // ============================================================================
-// PAYMENT WEBHOOK HANDLER - COMPLETE LOGGING
+// PAYMENT WEBHOOK HANDLER - ENHANCED LOGGING
 // ============================================================================
 
 /**
  * Verify webhook signature
  */
 const verifyWebhookSignature = (req, res, next) => {
-  console.log('\n🟡 [WEBHOOK] Verifying webhook signature');
+  console.log('\n🟡 [WEBHOOK SIGNATURE] Verifying webhook signature');
   
   const signature = req.headers['x-chapa-signature'];
   const webhookSecret = process.env.CHAPA_WEBHOOK_SECRET;
 
-  console.log('📋 Headers received:', {
+  console.log('📋 Webhook Headers Received:', {
     'x-chapa-signature': signature ? '✅ Present' : '❌ Missing',
     'content-type': req.headers['content-type'],
-    'user-agent': req.headers['user-agent']
+    'user-agent': req.headers['user-agent'],
+    'host': req.headers['host'],
+    'content-length': req.headers['content-length']
   });
 
   if (!signature) {
@@ -460,72 +462,104 @@ const verifyWebhookSignature = (req, res, next) => {
 };
 
 /**
- * Update user payment status after successful payment (webhook) - COMPLETE LOGGING
+ * Update user payment status after successful payment (webhook) - ENHANCED LOGGING
  */
 const updatePaymentStatus = async (req, res) => {
-  console.log('\n🔥🔥🔥 [WEBHOOK] PAYMENT UPDATE STARTED');
+  console.log('\n🔥🔥🔥 [WEBHOOK RECEIVED] PAYMENT UPDATE STARTED');
   console.log('⏰ Timestamp:', new Date().toISOString());
-  console.log('📦 Full webhook payload:', JSON.stringify(req.body, null, 2));
+  console.log('📦 FULL WEBHOOK PAYLOAD:', JSON.stringify(req.body, null, 2));
+  console.log('📋 ALL HEADERS:', JSON.stringify(req.headers, null, 2));
+  console.log('🌐 Request IP:', req.ip);
+  console.log('🔌 Request Method:', req.method);
+  console.log('📌 Request URL:', req.originalUrl);
   
   try {
-    const { tx_ref, status, first_name, last_name, amount, currency } = req.body;
+    const { tx_ref, status, first_name, last_name, amount, currency, event } = req.body;
     
-    console.log('🔍 Webhook data extracted:', {
+    console.log('🔍 EXTRACTED WEBHOOK DATA:', {
       tx_ref,
       status,
       first_name,
       last_name,
       amount,
-      currency
+      currency,
+      event
     });
     
     if (!tx_ref) {
-      console.error('❌ CRITICAL: No tx_ref in webhook payload');
+      console.error('❌ CRITICAL ERROR: No tx_ref in webhook payload');
       console.log('📦 Full body for debugging:', req.body);
+      
+      // Log all keys in the body to help debug
+      console.log('🔑 Keys in webhook body:', Object.keys(req.body));
+      
       return res.status(200).json({ 
         success: false, 
         message: 'Missing tx_ref',
-        received: req.body 
+        received: req.body,
+        timestamp: new Date().toISOString()
       });
     }
     
-    console.log('🔍 Processing webhook for tx_ref:', tx_ref);
+    console.log('🔍 PROCESSING WEBHOOK for tx_ref:', tx_ref);
     console.log('💰 Payment status from Chapa:', status);
     
     // Find user by transaction reference
-    console.log('🔎 Searching for user with tx_ref:', tx_ref);
+    console.log('🔎 SEARCHING DATABASE for user with tx_ref:', tx_ref);
+    console.log('⏱️ Search started at:', new Date().toISOString());
+    
     const user = await User.findOne({ 'garageInfo.paymentTxRef': tx_ref });
+    
+    console.log('⏱️ Search completed at:', new Date().toISOString());
     
     if (!user) {
       console.error('❌❌❌ USER NOT FOUND for tx_ref:', tx_ref);
       
       // List all users with paymentTxRef for debugging
-      console.log('🔍 Searching all users with paymentTxRef...');
+      console.log('🔍 SEARCHING ALL users with paymentTxRef...');
       const allUsers = await User.find({ 
         'garageInfo.paymentTxRef': { $exists: true, $ne: null } 
-      }).select('email garageInfo.paymentTxRef');
+      }).select('email garageInfo.paymentTxRef _id');
       
-      console.log('📋 Users with paymentTxRef found:', allUsers.length);
-      allUsers.forEach((u, index) => {
-        console.log(`  ${index + 1}. Email: ${u.email}, tx_ref: ${u.garageInfo?.paymentTxRef}`);
-      });
+      console.log('📋 TOTAL USERS with paymentTxRef found:', allUsers.length);
+      
+      if (allUsers.length === 0) {
+        console.log('⚠️ No users have any paymentTxRef in database');
+      } else {
+        allUsers.forEach((u, index) => {
+          console.log(`  ${index + 1}. ID: ${u._id}, Email: ${u.email}, tx_ref: ${u.garageInfo?.paymentTxRef}`);
+        });
+        
+        // Check if any tx_ref partially matches
+        console.log('🔍 Checking for partial matches...');
+        allUsers.forEach(u => {
+          const storedRef = u.garageInfo?.paymentTxRef;
+          if (storedRef && tx_ref && storedRef.includes(tx_ref.slice(-10))) {
+            console.log(`⚠️ POSSIBLE MATCH: User ${u.email} has tx_ref: ${storedRef} (ends with ${tx_ref.slice(-10)})`);
+          }
+        });
+      }
       
       return res.status(200).json({ 
         success: false, 
         message: 'User not found for this transaction',
         tx_ref: tx_ref,
-        searchedIn: 'garageInfo.paymentTxRef'
+        searchedIn: 'garageInfo.paymentTxRef',
+        timestamp: new Date().toISOString()
       });
     }
 
-    console.log('✅✅ USER FOUND:', { 
+    console.log('✅✅ USER FOUND SUCCESSFULLY!');
+    console.log('📊 USER DETAILS:', { 
       id: user._id.toString(),
       email: user.email, 
       currentPaymentStatus: user.garageInfo.paymentStatus,
       currentVerificationStatus: user.garageInfo.verificationStatus,
       paymentPlan: user.garageInfo.paymentPlan,
       hasPaymentDate: !!user.garageInfo.paymentDate,
-      hasPaymentExpiry: !!user.garageInfo.paymentExpiry
+      hasPaymentExpiry: !!user.garageInfo.paymentExpiry,
+      documentsCount: user.garageInfo.documents?.length || 0,
+      agreementsCount: user.garageInfo.agreements?.length || 0
     });
 
     // Update based on payment status
@@ -537,6 +571,8 @@ const updatePaymentStatus = async (req, res) => {
         paymentStatus: user.garageInfo.paymentStatus,
         verificationStatus: user.garageInfo.verificationStatus
       };
+      
+      console.log('📊 OLD VALUES:', oldValues);
       
       // PAYMENT SUCCESSFUL - UPDATE DATABASE
       user.garageInfo.paymentStatus = 'paid';
@@ -564,12 +600,15 @@ const updatePaymentStatus = async (req, res) => {
       }
       user.garageInfo.verificationProgress.paymentCompleted = true;
       
-      console.log('💾 Saving to database...');
+      console.log('💾 SAVING to database...');
+      console.log('⏱️ Save started at:', new Date().toISOString());
+      
       await user.save();
       
+      console.log('⏱️ Save completed at:', new Date().toISOString());
       console.log('✅✅✅✅✅ WEBHOOK: DATABASE UPDATED TO PAID SUCCESSFULLY!');
-      console.log('📊 Old values:', oldValues);
-      console.log('📊 New values:', {
+      console.log('📊 OLD VALUES:', oldValues);
+      console.log('📊 NEW VALUES:', {
         paymentStatus: user.garageInfo.paymentStatus,
         verificationStatus: user.garageInfo.verificationStatus,
         paymentDate: user.garageInfo.paymentDate,
@@ -579,7 +618,7 @@ const updatePaymentStatus = async (req, res) => {
       });
       
       // Verify the update by fetching again
-      console.log('🔍 Verifying update with new query...');
+      console.log('🔍 VERIFYING update with new query...');
       const verifyUser = await User.findOne({ 'garageInfo.paymentTxRef': tx_ref });
       console.log('✅ VERIFICATION AFTER UPDATE:', {
         paymentStatus: verifyUser.garageInfo.paymentStatus,
@@ -587,6 +626,8 @@ const updatePaymentStatus = async (req, res) => {
         paymentDate: verifyUser.garageInfo.paymentDate,
         paymentExpiry: verifyUser.garageInfo.paymentExpiry
       });
+      
+      console.log('📤 SENDING SUCCESS RESPONSE to Chapa');
       
       return res.status(200).json({
         success: true,
@@ -596,7 +637,8 @@ const updatePaymentStatus = async (req, res) => {
           verificationStatus: user.garageInfo.verificationStatus,
           paymentDate: user.garageInfo.paymentDate,
           paymentExpiry: user.garageInfo.paymentExpiry
-        }
+        },
+        timestamp: new Date().toISOString()
       });
       
     } else if (status === 'failed') {
@@ -614,7 +656,8 @@ const updatePaymentStatus = async (req, res) => {
         data: {
           paymentStatus: user.garageInfo.paymentStatus,
           verificationStatus: user.garageInfo.verificationStatus
-        }
+        },
+        timestamp: new Date().toISOString()
       });
       
     } else {
@@ -623,7 +666,8 @@ const updatePaymentStatus = async (req, res) => {
       return res.status(200).json({
         success: true,
         message: 'Unknown status received',
-        data: { status, tx_ref }
+        data: { status, tx_ref },
+        timestamp: new Date().toISOString()
       });
     }
   } catch (error) {
@@ -631,13 +675,40 @@ const updatePaymentStatus = async (req, res) => {
     console.error('Error stack:', error.stack);
     console.error('Error name:', error.name);
     console.error('Error message:', error.message);
+    console.error('Error code:', error.code);
     
     return res.status(200).json({
       success: false,
       message: 'Error processing webhook',
-      error: error.message
+      error: error.message,
+      timestamp: new Date().toISOString()
     });
   }
+};
+
+// ============================================================================
+// WEBHOOK TEST ENDPOINT (FOR DEBUGGING)
+// ============================================================================
+
+/**
+ * Test webhook endpoint - logs everything but doesn't update DB
+ */
+const testWebhook = async (req, res) => {
+  console.log('\n🧪 [TEST WEBHOOK] Test webhook received');
+  console.log('⏰ Timestamp:', new Date().toISOString());
+  console.log('📦 FULL TEST PAYLOAD:', JSON.stringify(req.body, null, 2));
+  console.log('📋 ALL HEADERS:', JSON.stringify(req.headers, null, 2));
+  console.log('🌐 Request IP:', req.ip);
+  console.log('🔌 Request Method:', req.method);
+  console.log('📌 Request URL:', req.originalUrl);
+  
+  return res.status(200).json({
+    success: true,
+    message: 'Test webhook received',
+    received: req.body,
+    headers: req.headers,
+    timestamp: new Date().toISOString()
+  });
 };
 
 // ============================================================================
@@ -743,7 +814,8 @@ const checkPaymentStatus = async (req, res) => {
       verificationStatus,
       paymentDate: user.garageInfo?.paymentDate,
       paymentExpiry: user.garageInfo?.paymentExpiry,
-      paymentPlan: user.garageInfo?.paymentPlan
+      paymentPlan: user.garageInfo?.paymentPlan,
+      paymentTxRef: user.garageInfo?.paymentTxRef
     });
 
     res.json({
@@ -754,6 +826,7 @@ const checkPaymentStatus = async (req, res) => {
         paymentDate: user.garageInfo?.paymentDate || null,
         paymentExpiry: user.garageInfo?.paymentExpiry || null,
         paymentPlan: user.garageInfo?.paymentPlan || null,
+        paymentTxRef: user.garageInfo?.paymentTxRef || null,
         canAccess: {
           dashboard: ['approved', 'under_review', 'payment_completed'].includes(verificationStatus),
           payment: ['pending', 'failed', 'expired', 'processing'].includes(paymentStatus)
@@ -979,6 +1052,7 @@ module.exports = {
   manualPaymentUpdate,
   forceUpdatePayment,
   debugWebhook,
+  testWebhook,  // New test endpoint
   
   // Error handler
   paymentErrorHandler
