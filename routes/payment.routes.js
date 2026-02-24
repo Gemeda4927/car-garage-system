@@ -15,6 +15,8 @@ const {
   verifyChapaPayment,
   verifyWebhookSignature,
   updatePaymentStatus,
+  checkPaymentStatus,  // ADD THIS - new function
+  manualPaymentUpdate, // ADD THIS - for testing
   paymentErrorHandler
 } = require('../middleware/payment.middleware');
 
@@ -40,14 +42,7 @@ router.post(
   initializeChapaPayment,
   async (req, res) => {
     try {
-      // Save transaction reference to user
-      const user = await User.findById(req.user.id);
-      user.garageInfo.paymentTxRef = req.tx_ref;
-      user.garageInfo.paymentStatus = 'processing';
-      user.garageInfo.paymentPlan = req.paymentDetails.plan;
-      user.garageInfo.paymentAmount = req.paymentDetails.amount;
-      await user.save();
-
+      // Transaction already saved in middleware, just return response
       res.json({
         success: true,
         message: 'Payment initialized successfully',
@@ -59,6 +54,7 @@ router.post(
         }
       });
     } catch (error) {
+      console.error('❌ Payment initialization error:', error);
       res.status(500).json({
         success: false,
         message: 'Error saving payment reference',
@@ -88,27 +84,20 @@ router.get(
       // Find user by tx_ref
       const user = await User.findOne({ 'garageInfo.paymentTxRef': tx_ref });
       
-      if (user && req.verificationResult.success) {
-        // Update user status if verified
-        user.garageInfo.paymentStatus = 'paid';
-        user.garageInfo.paymentDate = new Date();
-        user.garageInfo.paymentExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
-        user.garageInfo.verificationStatus = 'payment_completed';
-        await user.save();
-      }
-
       res.json({
         success: true,
         data: {
-          verified: req.verificationResult.success,
-          paymentDetails: req.verificationResult.data,
-          userStatus: user?.garageInfo?.verificationStatus
+          verified: req.verificationResult?.success || false,
+          paymentDetails: req.verificationResult?.data || null,
+          userStatus: user?.garageInfo?.verificationStatus || 'unknown',
+          paymentStatus: user?.garageInfo?.paymentStatus || 'unknown'
         }
       });
     } catch (error) {
+      console.error('❌ Verification error:', error);
       res.status(500).json({
         success: false,
-        message: 'Error updating payment status',
+        message: 'Error verifying payment',
         error: error.message
       });
     }
@@ -116,40 +105,29 @@ router.get(
 );
 
 // ============================================================================
-// PAYMENT CALLBACK (CHAPA Webhook)
+// PAYMENT CALLBACK (CHAPA Webhook) - FIXED VERSION
 // ============================================================================
 
 /**
  * @route   POST /api/v1/payments/callback
  * @desc    CHAPA payment callback webhook
  * @access  Public (called by CHAPA)
+ * 
+ * IMPORTANT: This endpoint must:
+ * 1. Return 200 OK as fast as possible
+ * 2. Update database based on payment status
+ * 3. Handle duplicate webhooks gracefully
  */
 router.post(
   '/callback',
-  verifyWebhookSignature,
-  updatePaymentStatus,
-  async (req, res) => {
-    try {
-      const { tx_ref, status } = req.body;
-      
-      console.log(`Payment callback received for transaction: ${tx_ref} with status: ${status}`);
-      
-      res.status(200).json({
-        success: true,
-        message: 'Callback received successfully'
-      });
-    } catch (error) {
-      console.error('Callback error:', error);
-      res.status(500).json({
-        success: false,
-        message: 'Error processing callback'
-      });
-    }
-  }
+  verifyWebhookSignature,           // Verify it's from Chapa
+  updatePaymentStatus               // This now handles the response
 );
 
+// No additional code here - updatePaymentStatus sends the response
+
 // ============================================================================
-// GET PAYMENT STATUS
+// GET PAYMENT STATUS - UPDATED
 // ============================================================================
 
 /**
@@ -160,35 +138,80 @@ router.post(
 router.get(
   '/status',
   protect,
+  checkPaymentStatus                // Using the dedicated middleware
+);
+
+// ============================================================================
+// MANUAL PAYMENT UPDATE (FOR TESTING/ADMIN)
+// ============================================================================
+
+/**
+ * @route   POST /api/v1/payments/manual-update
+ * @desc    Manually update payment status (ADMIN ONLY)
+ * @access  Private (Admin)
+ */
+router.post(
+  '/manual-update',
+  protect,
+  authorize('admin'),               // Only admins can do this
+  manualPaymentUpdate
+);
+
+// ============================================================================
+// FORCE UPDATE FOR CURRENT USER (TEMPORARY - FOR DEBUGGING)
+// ============================================================================
+
+/**
+ * @route   POST /api/v1/payments/force-update
+ * @desc    Force update payment status for current user (TEMPORARY)
+ * @access  Private (Garage Owner) - REMOVE AFTER TESTING
+ */
+router.post(
+  '/force-update',
+  protect,
+  authorize('garage_owner'),
   async (req, res) => {
     try {
+      const { status = 'paid' } = req.body;
+      
       const user = await User.findById(req.user.id);
       
-      if (!user || user.role !== 'garage_owner') {
+      if (!user) {
         return res.status(404).json({
           success: false,
-          message: 'Garage owner not found'
+          message: 'User not found'
         });
       }
-
+      
+      // Force update
+      user.garageInfo.paymentStatus = status;
+      
+      if (status === 'paid') {
+        user.garageInfo.paymentDate = new Date();
+        user.garageInfo.paymentExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+        user.garageInfo.verificationStatus = 'payment_completed';
+        user.garageInfo.verificationProgress.paymentCompleted = true;
+      }
+      
+      await user.save();
+      
+      console.log('✅ FORCE UPDATE applied for user:', user.email);
+      
       res.json({
         success: true,
+        message: `Payment status force updated to ${status}`,
         data: {
-          paymentStatus: user.garageInfo?.paymentStatus || 'not_required',
-          verificationStatus: user.garageInfo?.verificationStatus,
-          paymentDate: user.garageInfo?.paymentDate,
-          paymentExpiry: user.garageInfo?.paymentExpiry,
-          paymentPlan: user.garageInfo?.paymentPlan,
-          canAccess: {
-            dashboard: ['approved', 'under_review', 'payment_completed'].includes(user.garageInfo?.verificationStatus),
-            payment: ['pending', 'failed', 'expired'].includes(user.garageInfo?.paymentStatus)
-          }
+          paymentStatus: user.garageInfo.paymentStatus,
+          verificationStatus: user.garageInfo.verificationStatus,
+          paymentDate: user.garageInfo.paymentDate,
+          paymentExpiry: user.garageInfo.paymentExpiry
         }
       });
     } catch (error) {
+      console.error('❌ Force update error:', error);
       res.status(500).json({
         success: false,
-        message: 'Error fetching payment status',
+        message: 'Error force updating payment',
         error: error.message
       });
     }
@@ -254,6 +277,71 @@ router.get('/plans', (req, res) => {
     success: true,
     data: plans
   });
+});
+
+// ============================================================================
+// WEBHOOK DEBUG ENDPOINT (TEMPORARY)
+// ============================================================================
+
+/**
+ * @route   POST /api/v1/payments/debug-webhook
+ * @desc    Debug webhook - simulates Chapa callback
+ * @access  Public (TEMPORARY - REMOVE AFTER TESTING)
+ */
+router.post('/debug-webhook', async (req, res) => {
+  try {
+    const { tx_ref, status = 'success' } = req.body;
+    
+    if (!tx_ref) {
+      return res.status(400).json({
+        success: false,
+        message: 'tx_ref is required'
+      });
+    }
+    
+    console.log('🔧 DEBUG WEBHOOK CALLED with:', { tx_ref, status });
+    
+    // Find user
+    const user = await User.findOne({ 'garageInfo.paymentTxRef': tx_ref });
+    
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found for this tx_ref'
+      });
+    }
+    
+    console.log('✅ Debug: User found:', user.email);
+    
+    // Update database
+    if (status === 'success') {
+      user.garageInfo.paymentStatus = 'paid';
+      user.garageInfo.paymentDate = new Date();
+      user.garageInfo.paymentExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+      user.garageInfo.verificationStatus = 'payment_completed';
+      user.garageInfo.verificationProgress.paymentCompleted = true;
+      
+      await user.save();
+      
+      console.log('✅✅✅ DEBUG: Database updated to PAID');
+    }
+    
+    res.json({
+      success: true,
+      message: 'Debug webhook processed',
+      data: {
+        user: user.email,
+        paymentStatus: user.garageInfo.paymentStatus,
+        verificationStatus: user.garageInfo.verificationStatus
+      }
+    });
+  } catch (error) {
+    console.error('❌ Debug webhook error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
 });
 
 // ============================================================================

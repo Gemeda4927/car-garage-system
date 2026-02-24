@@ -1,5 +1,6 @@
 const axios = require('axios');
 const User = require('../models/User');
+const crypto = require('crypto');
 
 // CHAPA Configuration
 const CHAPA_SECRET_KEY = process.env.CHAPA_SECRET_KEY;
@@ -13,22 +14,28 @@ const CHAPA_API_URL = process.env.CHAPA_API_URL || 'https://api.chapa.co/v1';
  * Verify that payment is required and valid
  */
 const validatePayment = async (req, res, next) => {
+  console.log('\n🟡 [1/8] VALIDATE PAYMENT - Starting payment validation');
+  console.log('📝 Request body:', req.body);
+  
   try {
     const { plan = 'basic' } = req.body;
+    console.log('📋 Selected plan:', plan);
     
     // Validate plan
     const validPlans = ['basic', 'premium', 'yearly'];
     if (!validPlans.includes(plan)) {
+      console.log('❌ Invalid plan selected:', plan);
       return res.status(400).json({
         success: false,
         message: 'Invalid payment plan. Choose basic, premium, or yearly'
       });
     }
     
-    // Attach plan to request
+    console.log('✅ Plan validated successfully');
     req.paymentPlan = plan;
     next();
   } catch (error) {
+    console.error('❌ Validation error:', error);
     return res.status(500).json({
       success: false,
       message: 'Payment validation error',
@@ -45,37 +52,55 @@ const validatePayment = async (req, res, next) => {
  * Check if user is eligible to make payment
  */
 const checkPaymentEligibility = async (req, res, next) => {
+  console.log('\n🟡 [2/8] CHECK ELIGIBILITY - Verifying user eligibility');
+  console.log('👤 User ID:', req.user.id);
+  
   try {
     const user = await User.findById(req.user.id);
     
     if (!user) {
+      console.log('❌ User not found in database');
       return res.status(404).json({
         success: false,
         message: 'User not found'
       });
     }
 
+    console.log('✅ User found:', { 
+      email: user.email, 
+      role: user.role,
+      paymentStatus: user.garageInfo?.paymentStatus,
+      verificationStatus: user.garageInfo?.verificationStatus
+    });
+
     // Check if user is garage owner
     if (user.role !== 'garage_owner') {
+      console.log('❌ User is not a garage owner. Role:', user.role);
       return res.status(403).json({
         success: false,
         message: 'Only garage owners can make payments'
       });
     }
+    console.log('✅ User is a garage owner');
 
     // Check if garage info exists
     if (!user.garageInfo) {
+      console.log('❌ No garage info found for user');
       return res.status(400).json({
         success: false,
         message: 'Please complete your garage registration first'
       });
     }
+    console.log('✅ Garage info exists');
 
     // Check payment eligibility based on status
     const eligibleStatuses = ['pending', 'failed', 'expired'];
     const currentStatus = user.garageInfo.paymentStatus;
     
+    console.log('💰 Current payment status:', currentStatus);
+    
     if (!eligibleStatuses.includes(currentStatus)) {
+      console.log('❌ Payment not allowed. Current status:', currentStatus);
       const statusMessages = {
         'paid': 'Payment already completed',
         'processing': 'Payment is being processed',
@@ -90,6 +115,7 @@ const checkPaymentEligibility = async (req, res, next) => {
         currentStatus
       });
     }
+    console.log('✅ Payment status eligible');
 
     // Check verification status eligibility
     const eligibleVerificationStatuses = [
@@ -99,18 +125,24 @@ const checkPaymentEligibility = async (req, res, next) => {
       'registration_started'
     ];
     
+    console.log('📋 Current verification status:', user.garageInfo.verificationStatus);
+    
     if (!eligibleVerificationStatuses.includes(user.garageInfo.verificationStatus)) {
+      console.log('❌ Verification status not eligible:', user.garageInfo.verificationStatus);
       return res.status(400).json({
         success: false,
         message: `Cannot process payment when status is: ${user.garageInfo.verificationStatus}`,
         requiredStatus: 'pending_payment or documents_uploaded'
       });
     }
+    console.log('✅ Verification status eligible');
 
     // Attach user to request for next middleware
     req.paymentUser = user;
+    console.log('✅ Eligibility check passed');
     next();
   } catch (error) {
+    console.error('❌ Eligibility check error:', error);
     return res.status(500).json({
       success: false,
       message: 'Error checking payment eligibility',
@@ -127,13 +159,22 @@ const checkPaymentEligibility = async (req, res, next) => {
  * Generate unique transaction reference (shorter version)
  */
 const generateTxRef = (req, res, next) => {
+  console.log('\n🟡 [3/8] GENERATE TX REF - Creating transaction reference');
+  
   const user = req.paymentUser || req.user;
-  const timestamp = Date.now().toString().slice(-8); // Last 8 digits
-  const random = Math.random().toString(36).substring(2, 8).toUpperCase(); // 6 chars
-  const userId = user._id.toString().slice(-6); // Last 6 chars of user ID
+  const timestamp = Date.now().toString().slice(-8);
+  const random = Math.random().toString(36).substring(2, 8).toUpperCase();
+  const userId = user._id.toString().slice(-6);
   
   req.tx_ref = `GAR-${userId}-${timestamp}-${random}`;
+  
+  console.log('📊 Generated using:', {
+    userId: userId,
+    timestamp: timestamp,
+    random: random
+  });
   console.log('✅ Generated tx_ref:', req.tx_ref);
+  
   next();
 };
 
@@ -141,23 +182,26 @@ const generateTxRef = (req, res, next) => {
  * Get payment amount based on plan
  */
 const getPaymentAmount = (req, res, next) => {
+  console.log('\n🟡 [4/8] GET PAYMENT AMOUNT - Calculating payment details');
+  
   const plan = req.paymentPlan || req.body.plan || 'basic';
+  console.log('📋 Selected plan:', plan);
   
   const plans = {
     basic: {
       amount: parseInt(process.env.BASIC_PLAN_AMOUNT) || 500,
       description: 'Basic Garage Listing - 30 days access',
-      duration: 30 // days
+      duration: 30
     },
     premium: {
       amount: parseInt(process.env.PREMIUM_PLAN_AMOUNT) || 1000,
       description: 'Premium Garage Listing - 30 days with featured placement',
-      duration: 30 // days
+      duration: 30
     },
     yearly: {
       amount: parseInt(process.env.YEARLY_PLAN_AMOUNT) || 5000,
       description: 'Yearly Premium Listing - 365 days with all features',
-      duration: 365 // days
+      duration: 365
     }
   };
 
@@ -171,7 +215,7 @@ const getPaymentAmount = (req, res, next) => {
     currency: 'ETB'
   };
   
-  console.log('✅ Payment details:', req.paymentDetails);
+  console.log('✅ Payment details calculated:', req.paymentDetails);
   next();
 };
 
@@ -183,12 +227,15 @@ const getPaymentAmount = (req, res, next) => {
  * Initialize payment with CHAPA API
  */
 const initializeChapaPayment = async (req, res, next) => {
+  console.log('\n🟡 [5/8] INITIALIZE CHAPA PAYMENT - Calling Chapa API');
+  
   try {
     const user = req.paymentUser || req.user;
     const { amount, description, currency } = req.paymentDetails;
     const tx_ref = req.tx_ref;
 
-    // Prepare payment data with short title (max 16 chars)
+    console.log('👤 User:', { email: user.email, name: user.name });
+
     const paymentData = {
       amount: amount.toString(),
       currency: currency,
@@ -199,14 +246,14 @@ const initializeChapaPayment = async (req, res, next) => {
       callback_url: process.env.CHAPA_CALLBACK_URL || `${process.env.API_URL}/api/v1/payments/callback`,
       return_url: process.env.CHAPA_RETURN_URL || `${process.env.CLIENT_URL}/payment/success`,
       customization: {
-        title: 'Garage Listing', // 13 characters - safe!
+        title: 'Garage Listing',
         description: description.substring(0, 50)
       }
     };
 
-    console.log('📤 Sending payment data to Chapa:', paymentData);
+    console.log('📤 Sending payment data to Chapa:', JSON.stringify(paymentData, null, 2));
+    console.log('🔑 Using Chapa secret key:', CHAPA_SECRET_KEY ? '✅ Present' : '❌ Missing');
 
-    // Call CHAPA API
     const response = await axios.post(
       `${CHAPA_API_URL}/transaction/initialize`,
       paymentData,
@@ -218,24 +265,36 @@ const initializeChapaPayment = async (req, res, next) => {
       }
     );
 
+    console.log('📥 Chapa API response:', JSON.stringify(response.data, null, 2));
+
     if (response.data.status === 'success') {
-      // Save transaction reference to user BEFORE payment
+      console.log('✅ Chapa initialization successful');
+      
       const user = await User.findById(req.user.id);
+      console.log('💾 Saving transaction to user database...');
+      
       user.garageInfo.paymentTxRef = tx_ref;
       user.garageInfo.paymentStatus = 'processing';
       user.garageInfo.paymentPlan = req.paymentDetails.plan;
       user.garageInfo.paymentAmount = req.paymentDetails.amount;
       await user.save();
       
-      console.log('✅ Transaction saved to user:', tx_ref);
+      console.log('✅ Transaction saved to user:', {
+        tx_ref: tx_ref,
+        status: 'processing',
+        userId: user._id
+      });
       
       req.chapaResponse = {
         success: true,
         checkout_url: response.data.data.checkout_url,
         tx_ref: tx_ref
       };
+      
+      console.log('🚀 Checkout URL:', response.data.data.checkout_url);
       next();
     } else {
+      console.log('❌ Chapa initialization failed:', response.data.message);
       return res.status(400).json({
         success: false,
         message: 'Payment initialization failed',
@@ -244,7 +303,11 @@ const initializeChapaPayment = async (req, res, next) => {
     }
   } catch (error) {
     console.error('❌ CHAPA API Error:', error.response?.data || error.message);
-    
+    if (error.response) {
+      console.error('Response status:', error.response.status);
+      console.error('Response headers:', error.response.headers);
+      console.error('Response data:', error.response.data);
+    }
     return res.status(500).json({
       success: false,
       message: 'Error connecting to payment gateway',
@@ -257,18 +320,21 @@ const initializeChapaPayment = async (req, res, next) => {
  * Verify payment with CHAPA API and update database
  */
 const verifyChapaPayment = async (req, res, next) => {
+  console.log('\n🟡 [VERIFY] Verifying payment with Chapa');
+  
   try {
     const { tx_ref } = req.params;
+    console.log('🔍 Verifying tx_ref:', tx_ref);
 
     if (!tx_ref) {
+      console.log('❌ No tx_ref provided');
       return res.status(400).json({
         success: false,
         message: 'Transaction reference is required'
       });
     }
 
-    console.log('🔍 Verifying payment:', tx_ref);
-
+    console.log('📡 Calling Chapa verification API...');
     const response = await axios.get(
       `${CHAPA_API_URL}/transaction/verify/${tx_ref}`,
       {
@@ -278,42 +344,54 @@ const verifyChapaPayment = async (req, res, next) => {
       }
     );
 
-    console.log('✅ Chapa verification response:', response.data);
+    console.log('📥 Chapa verification response:', JSON.stringify(response.data, null, 2));
 
-    // Find user by tx_ref
+    console.log('🔍 Searching for user with tx_ref:', tx_ref);
     const user = await User.findOne({ 'garageInfo.paymentTxRef': tx_ref });
     
+    if (!user) {
+      console.log('❌ No user found with tx_ref:', tx_ref);
+    } else {
+      console.log('✅ User found:', { email: user.email, currentStatus: user.garageInfo.paymentStatus });
+    }
+    
     if (user && response.data.status === 'success') {
-      // UPDATE DATABASE - PAYMENT SUCCESSFUL
+      console.log('💰 Payment verified - updating database to PAID');
+      
       user.garageInfo.paymentStatus = 'paid';
       user.garageInfo.paymentDate = new Date();
-      user.garageInfo.paymentExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
+      user.garageInfo.paymentExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
       user.garageInfo.verificationStatus = 'payment_completed';
       
-      // Update subscription if applicable
       if (user.garageInfo.paymentPlan === 'yearly') {
         user.garageInfo.subscriptionPlan = 'premium';
         user.garageInfo.subscriptionExpiry = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000);
+        console.log('📅 Yearly subscription set');
       } else {
         user.garageInfo.subscriptionPlan = 'basic';
         user.garageInfo.subscriptionExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+        console.log('📅 Monthly subscription set');
       }
       
-      // Mark profile as ready for review
       user.garageInfo.verificationProgress.paymentCompleted = true;
       
       await user.save();
       
-      console.log('✅✅✅ DATABASE UPDATED - Payment successful for user:', user.email);
-      console.log('📅 Payment expiry:', user.garageInfo.paymentExpiry);
-      console.log('🔄 Verification status:', user.garageInfo.verificationStatus);
+      console.log('✅✅✅ DATABASE UPDATED - Payment successful for user:', {
+        email: user.email,
+        paymentStatus: user.garageInfo.paymentStatus,
+        verificationStatus: user.garageInfo.verificationStatus,
+        paymentDate: user.garageInfo.paymentDate,
+        paymentExpiry: user.garageInfo.paymentExpiry
+      });
     } else if (user && response.data.status !== 'success') {
-      // UPDATE DATABASE - PAYMENT FAILED
+      console.log('❌ Payment verification failed - updating database to FAILED');
+      
       user.garageInfo.paymentStatus = 'failed';
       user.garageInfo.verificationStatus = 'pending_payment';
       await user.save();
       
-      console.log('❌ Payment failed for user:', user.email);
+      console.log('✅ Database updated to FAILED for user:', user.email);
     }
 
     req.verificationResult = {
@@ -322,9 +400,14 @@ const verifyChapaPayment = async (req, res, next) => {
       user: user
     };
     
+    console.log('✅ Verification complete');
     next();
   } catch (error) {
     console.error('❌ CHAPA Verification Error:', error.response?.data || error.message);
+    if (error.response) {
+      console.error('Response status:', error.response.status);
+      console.error('Response data:', error.response.data);
+    }
     return res.status(500).json({
       success: false,
       message: 'Error verifying payment',
@@ -334,119 +417,450 @@ const verifyChapaPayment = async (req, res, next) => {
 };
 
 // ============================================================================
-// PAYMENT WEBHOOK MIDDLEWARE
+// PAYMENT WEBHOOK HANDLER - COMPLETE LOGGING
 // ============================================================================
 
 /**
  * Verify webhook signature
  */
 const verifyWebhookSignature = (req, res, next) => {
+  console.log('\n🟡 [WEBHOOK] Verifying webhook signature');
+  
   const signature = req.headers['x-chapa-signature'];
   const webhookSecret = process.env.CHAPA_WEBHOOK_SECRET;
 
+  console.log('📋 Headers received:', {
+    'x-chapa-signature': signature ? '✅ Present' : '❌ Missing',
+    'content-type': req.headers['content-type'],
+    'user-agent': req.headers['user-agent']
+  });
+
   if (!signature) {
-    return res.status(401).json({
-      success: false,
-      message: 'No signature provided'
-    });
+    console.warn('⚠️ No signature provided in webhook');
   }
 
-  // In production, verify the signature
-  // const crypto = require('crypto');
-  // const hash = crypto.createHmac('sha256', webhookSecret).update(JSON.stringify(req.body)).digest('hex');
-  // if (hash !== signature) {
-  //   return res.status(401).json({ success: false, message: 'Invalid signature' });
-  // }
+  if (webhookSecret && signature) {
+    console.log('🔐 Verifying signature with secret...');
+    const hash = crypto.createHmac('sha256', webhookSecret)
+      .update(JSON.stringify(req.body))
+      .digest('hex');
+    
+    if (hash !== signature) {
+      console.error('❌ Invalid webhook signature');
+      console.log('Expected:', hash);
+      console.log('Received:', signature);
+    } else {
+      console.log('✅ Webhook signature verified');
+    }
+  } else {
+    console.log('⚠️ Signature verification skipped - missing secret or signature');
+  }
 
   next();
 };
 
-// ============================================================================
-// DATABASE UPDATE MIDDLEWARE (for webhook)
-// ============================================================================
-
 /**
- * Update user payment status after successful payment (webhook)
+ * Update user payment status after successful payment (webhook) - COMPLETE LOGGING
  */
-const updatePaymentStatus = async (req, res, next) => {
+const updatePaymentStatus = async (req, res) => {
+  console.log('\n🔥🔥🔥 [WEBHOOK] PAYMENT UPDATE STARTED');
+  console.log('⏰ Timestamp:', new Date().toISOString());
+  console.log('📦 Full webhook payload:', JSON.stringify(req.body, null, 2));
+  
   try {
-    const { tx_ref, status, first_name, last_name, amount } = req.body;
+    const { tx_ref, status, first_name, last_name, amount, currency } = req.body;
     
-    console.log('🔥 WEBHOOK RECEIVED:', { tx_ref, status, first_name, last_name, amount });
+    console.log('🔍 Webhook data extracted:', {
+      tx_ref,
+      status,
+      first_name,
+      last_name,
+      amount,
+      currency
+    });
+    
+    if (!tx_ref) {
+      console.error('❌ CRITICAL: No tx_ref in webhook payload');
+      console.log('📦 Full body for debugging:', req.body);
+      return res.status(200).json({ 
+        success: false, 
+        message: 'Missing tx_ref',
+        received: req.body 
+      });
+    }
+    
+    console.log('🔍 Processing webhook for tx_ref:', tx_ref);
+    console.log('💰 Payment status from Chapa:', status);
     
     // Find user by transaction reference
+    console.log('🔎 Searching for user with tx_ref:', tx_ref);
     const user = await User.findOne({ 'garageInfo.paymentTxRef': tx_ref });
     
     if (!user) {
-      console.error('❌ User not found for tx_ref:', tx_ref);
-      return res.status(404).json({
-        success: false,
-        message: 'User not found for this transaction'
+      console.error('❌❌❌ USER NOT FOUND for tx_ref:', tx_ref);
+      
+      // List all users with paymentTxRef for debugging
+      console.log('🔍 Searching all users with paymentTxRef...');
+      const allUsers = await User.find({ 
+        'garageInfo.paymentTxRef': { $exists: true, $ne: null } 
+      }).select('email garageInfo.paymentTxRef');
+      
+      console.log('📋 Users with paymentTxRef found:', allUsers.length);
+      allUsers.forEach((u, index) => {
+        console.log(`  ${index + 1}. Email: ${u.email}, tx_ref: ${u.garageInfo?.paymentTxRef}`);
+      });
+      
+      return res.status(200).json({ 
+        success: false, 
+        message: 'User not found for this transaction',
+        tx_ref: tx_ref,
+        searchedIn: 'garageInfo.paymentTxRef'
       });
     }
 
-    console.log('✅ User found:', user.email);
+    console.log('✅✅ USER FOUND:', { 
+      id: user._id.toString(),
+      email: user.email, 
+      currentPaymentStatus: user.garageInfo.paymentStatus,
+      currentVerificationStatus: user.garageInfo.verificationStatus,
+      paymentPlan: user.garageInfo.paymentPlan,
+      hasPaymentDate: !!user.garageInfo.paymentDate,
+      hasPaymentExpiry: !!user.garageInfo.paymentExpiry
+    });
 
     // Update based on payment status
-    if (status === 'success' || status === 'completed') {
+    if (status === 'success' || status === 'completed' || status === 'successful') {
+      console.log('💰💰💰 PAYMENT SUCCESSFUL - UPDATING DATABASE...');
+      
+      // Store old values for comparison
+      const oldValues = {
+        paymentStatus: user.garageInfo.paymentStatus,
+        verificationStatus: user.garageInfo.verificationStatus
+      };
+      
       // PAYMENT SUCCESSFUL - UPDATE DATABASE
       user.garageInfo.paymentStatus = 'paid';
       user.garageInfo.paymentDate = new Date();
-      user.garageInfo.paymentExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
+      user.garageInfo.paymentExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
       user.garageInfo.verificationStatus = 'payment_completed';
       
-      // Update subscription
+      console.log('📅 Setting payment date:', user.garageInfo.paymentDate);
+      console.log('📅 Setting payment expiry:', user.garageInfo.paymentExpiry);
+      
+      // Update subscription based on plan
       if (user.garageInfo.paymentPlan === 'yearly') {
         user.garageInfo.subscriptionPlan = 'premium';
         user.garageInfo.subscriptionExpiry = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000);
+        console.log('📅 Yearly subscription set, expires:', user.garageInfo.subscriptionExpiry);
       } else {
         user.garageInfo.subscriptionPlan = 'basic';
         user.garageInfo.subscriptionExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+        console.log('📅 Monthly subscription set, expires:', user.garageInfo.subscriptionExpiry);
       }
       
       // Mark payment completed in verification progress
+      if (!user.garageInfo.verificationProgress) {
+        user.garageInfo.verificationProgress = {};
+      }
       user.garageInfo.verificationProgress.paymentCompleted = true;
       
-      console.log('✅✅✅ WEBHOOK: Database updated to PAID for user:', user.email);
+      console.log('💾 Saving to database...');
+      await user.save();
+      
+      console.log('✅✅✅✅✅ WEBHOOK: DATABASE UPDATED TO PAID SUCCESSFULLY!');
+      console.log('📊 Old values:', oldValues);
+      console.log('📊 New values:', {
+        paymentStatus: user.garageInfo.paymentStatus,
+        verificationStatus: user.garageInfo.verificationStatus,
+        paymentDate: user.garageInfo.paymentDate,
+        paymentExpiry: user.garageInfo.paymentExpiry,
+        subscriptionPlan: user.garageInfo.subscriptionPlan,
+        subscriptionExpiry: user.garageInfo.subscriptionExpiry
+      });
+      
+      // Verify the update by fetching again
+      console.log('🔍 Verifying update with new query...');
+      const verifyUser = await User.findOne({ 'garageInfo.paymentTxRef': tx_ref });
+      console.log('✅ VERIFICATION AFTER UPDATE:', {
+        paymentStatus: verifyUser.garageInfo.paymentStatus,
+        verificationStatus: verifyUser.garageInfo.verificationStatus,
+        paymentDate: verifyUser.garageInfo.paymentDate,
+        paymentExpiry: verifyUser.garageInfo.paymentExpiry
+      });
+      
+      return res.status(200).json({
+        success: true,
+        message: 'Payment status updated successfully to PAID',
+        data: {
+          paymentStatus: user.garageInfo.paymentStatus,
+          verificationStatus: user.garageInfo.verificationStatus,
+          paymentDate: user.garageInfo.paymentDate,
+          paymentExpiry: user.garageInfo.paymentExpiry
+        }
+      });
+      
     } else if (status === 'failed') {
-      // PAYMENT FAILED
+      console.log('❌❌ PAYMENT FAILED - UPDATING DATABASE...');
+      
       user.garageInfo.paymentStatus = 'failed';
       user.garageInfo.verificationStatus = 'pending_payment';
-      console.log('❌ WEBHOOK: Payment failed for user:', user.email);
-    } else if (status === 'cancelled') {
-      // PAYMENT CANCELLED
-      user.garageInfo.paymentStatus = 'cancelled';
-      user.garageInfo.verificationStatus = 'pending_payment';
-      console.log('⚠️ WEBHOOK: Payment cancelled for user:', user.email);
+      await user.save();
+      
+      console.log('✅ Database updated to FAILED for user:', user.email);
+      
+      return res.status(200).json({
+        success: true,
+        message: 'Payment failed status recorded',
+        data: {
+          paymentStatus: user.garageInfo.paymentStatus,
+          verificationStatus: user.garageInfo.verificationStatus
+        }
+      });
+      
+    } else {
+      console.log('❓ Unknown payment status:', status);
+      
+      return res.status(200).json({
+        success: true,
+        message: 'Unknown status received',
+        data: { status, tx_ref }
+      });
     }
-
-    await user.save();
-    console.log('✅ Database save complete');
-
-    req.updatedUser = user;
-    next();
   } catch (error) {
-    console.error('❌ Error updating payment status:', error);
-    return res.status(500).json({
+    console.error('❌❌❌ CRITICAL ERROR in webhook:', error);
+    console.error('Error stack:', error.stack);
+    console.error('Error name:', error.name);
+    console.error('Error message:', error.message);
+    
+    return res.status(200).json({
       success: false,
-      message: 'Error updating payment status',
+      message: 'Error processing webhook',
       error: error.message
     });
   }
 };
 
 // ============================================================================
-// MANUAL PAYMENT UPDATE (FOR ADMIN/TESTING)
+// FORCE UPDATE ENDPOINT (FOR TESTING/EMERGENCY)
+// ============================================================================
+
+/**
+ * Force update payment status for a user (USE ONLY FOR TESTING)
+ */
+const forceUpdatePayment = async (req, res) => {
+  console.log('\n🔧 [FORCE UPDATE] Manual force update triggered');
+  
+  try {
+    const { tx_ref, status = 'paid' } = req.body;
+    
+    console.log('📋 Force update params:', { tx_ref, status });
+    
+    if (!tx_ref) {
+      console.log('❌ No tx_ref provided');
+      return res.status(400).json({
+        success: false,
+        message: 'tx_ref is required'
+      });
+    }
+
+    console.log('🔎 Searching for user with tx_ref:', tx_ref);
+    const user = await User.findOne({ 'garageInfo.paymentTxRef': tx_ref });
+    
+    if (!user) {
+      console.log('❌ User not found for tx_ref:', tx_ref);
+      return res.status(404).json({
+        success: false,
+        message: 'User not found for this tx_ref'
+      });
+    }
+
+    console.log('✅ User found:', { 
+      email: user.email, 
+      currentStatus: user.garageInfo.paymentStatus 
+    });
+
+    // Force update
+    user.garageInfo.paymentStatus = 'paid';
+    user.garageInfo.paymentDate = new Date();
+    user.garageInfo.paymentExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+    user.garageInfo.verificationStatus = 'payment_completed';
+    user.garageInfo.verificationProgress.paymentCompleted = true;
+    
+    await user.save();
+    
+    console.log('✅✅✅ FORCE UPDATE COMPLETE');
+    console.log('New status:', {
+      paymentStatus: user.garageInfo.paymentStatus,
+      verificationStatus: user.garageInfo.verificationStatus
+    });
+    
+    res.json({
+      success: true,
+      message: 'Payment status force updated to PAID',
+      data: {
+        paymentStatus: user.garageInfo.paymentStatus,
+        verificationStatus: user.garageInfo.verificationStatus,
+        paymentDate: user.garageInfo.paymentDate,
+        paymentExpiry: user.garageInfo.paymentExpiry
+      }
+    });
+  } catch (error) {
+    console.error('❌ Force update error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+};
+
+// ============================================================================
+// CHECK PAYMENT STATUS ENDPOINT
+// ============================================================================
+
+/**
+ * Check payment status for a user
+ */
+const checkPaymentStatus = async (req, res) => {
+  console.log('\n📊 [STATUS CHECK] Checking payment status for user:', req.user.id);
+  
+  try {
+    const user = await User.findById(req.user.id);
+    
+    if (!user) {
+      console.log('❌ User not found');
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    const paymentStatus = user.garageInfo?.paymentStatus || 'not_required';
+    const verificationStatus = user.garageInfo?.verificationStatus || 'pending';
+    
+    console.log('📊 Payment status check result:', {
+      email: user.email,
+      paymentStatus,
+      verificationStatus,
+      paymentDate: user.garageInfo?.paymentDate,
+      paymentExpiry: user.garageInfo?.paymentExpiry,
+      paymentPlan: user.garageInfo?.paymentPlan
+    });
+
+    res.json({
+      success: true,
+      data: {
+        paymentStatus,
+        verificationStatus,
+        paymentDate: user.garageInfo?.paymentDate || null,
+        paymentExpiry: user.garageInfo?.paymentExpiry || null,
+        paymentPlan: user.garageInfo?.paymentPlan || null,
+        canAccess: {
+          dashboard: ['approved', 'under_review', 'payment_completed'].includes(verificationStatus),
+          payment: ['pending', 'failed', 'expired', 'processing'].includes(paymentStatus)
+        }
+      }
+    });
+  } catch (error) {
+    console.error('❌ Error checking payment status:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error checking payment status',
+      error: error.message
+    });
+  }
+};
+
+// ============================================================================
+// DEBUG WEBHOOK (FOR TESTING)
+// ============================================================================
+
+/**
+ * Debug webhook - simulates Chapa callback
+ */
+const debugWebhook = async (req, res) => {
+  console.log('\n🔧 [DEBUG WEBHOOK] Simulating Chapa callback');
+  
+  try {
+    const { tx_ref, status = 'success' } = req.body;
+    
+    console.log('📋 Debug webhook params:', { tx_ref, status });
+    
+    if (!tx_ref) {
+      console.log('❌ No tx_ref provided');
+      return res.status(400).json({
+        success: false,
+        message: 'tx_ref is required'
+      });
+    }
+    
+    console.log('🔎 Searching for user with tx_ref:', tx_ref);
+    const user = await User.findOne({ 'garageInfo.paymentTxRef': tx_ref });
+    
+    if (!user) {
+      console.log('❌ User not found for tx_ref:', tx_ref);
+      return res.status(404).json({
+        success: false,
+        message: 'User not found for this tx_ref'
+      });
+    }
+    
+    console.log('✅ User found:', { 
+      email: user.email, 
+      currentStatus: user.garageInfo.paymentStatus 
+    });
+    
+    if (status === 'success') {
+      console.log('💰 Simulating successful payment...');
+      user.garageInfo.paymentStatus = 'paid';
+      user.garageInfo.paymentDate = new Date();
+      user.garageInfo.paymentExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+      user.garageInfo.verificationStatus = 'payment_completed';
+      user.garageInfo.verificationProgress.paymentCompleted = true;
+      
+      await user.save();
+      
+      console.log('✅✅✅ DEBUG: Database updated to PAID');
+      console.log('New status:', {
+        paymentStatus: user.garageInfo.paymentStatus,
+        verificationStatus: user.garageInfo.verificationStatus
+      });
+    }
+    
+    res.json({
+      success: true,
+      message: 'Debug webhook processed',
+      data: {
+        user: user.email,
+        paymentStatus: user.garageInfo.paymentStatus,
+        verificationStatus: user.garageInfo.verificationStatus
+      }
+    });
+  } catch (error) {
+    console.error('❌ Debug webhook error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+};
+
+// ============================================================================
+// MANUAL PAYMENT UPDATE (FOR ADMIN)
 // ============================================================================
 
 /**
  * Manually update payment status (admin only)
  */
 const manualPaymentUpdate = async (req, res) => {
+  console.log('\n👤 [MANUAL UPDATE] Admin manual update triggered');
+  
   try {
     const { userId, status } = req.body;
     
+    console.log('📋 Manual update params:', { userId, status });
+    
     if (!userId || !status) {
+      console.log('❌ Missing required fields');
       return res.status(400).json({
         success: false,
         message: 'User ID and status are required'
@@ -456,28 +870,34 @@ const manualPaymentUpdate = async (req, res) => {
     const user = await User.findById(userId);
     
     if (!user) {
+      console.log('❌ User not found:', userId);
       return res.status(404).json({
         success: false,
         message: 'User not found'
       });
     }
 
-    // Valid statuses
+    console.log('✅ User found:', { 
+      email: user.email, 
+      currentStatus: user.garageInfo.paymentStatus 
+    });
+
     const validStatuses = ['pending', 'processing', 'paid', 'failed', 'expired', 'cancelled'];
     if (!validStatuses.includes(status)) {
+      console.log('❌ Invalid status:', status);
       return res.status(400).json({
         success: false,
         message: `Invalid status. Must be one of: ${validStatuses.join(', ')}`
       });
     }
 
-    // Update payment status
     user.garageInfo.paymentStatus = status;
     
     if (status === 'paid') {
       user.garageInfo.paymentDate = new Date();
       user.garageInfo.paymentExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
       user.garageInfo.verificationStatus = 'payment_completed';
+      user.garageInfo.verificationProgress.paymentCompleted = true;
       
       if (user.garageInfo.paymentPlan === 'yearly') {
         user.garageInfo.subscriptionPlan = 'premium';
@@ -487,6 +907,11 @@ const manualPaymentUpdate = async (req, res) => {
 
     await user.save();
 
+    console.log('✅ Manual update completed for user:', {
+      email: user.email,
+      newStatus: user.garageInfo.paymentStatus
+    });
+    
     res.json({
       success: true,
       message: `Payment status updated to ${status}`,
@@ -515,7 +940,9 @@ const manualPaymentUpdate = async (req, res) => {
  * Handle payment errors
  */
 const paymentErrorHandler = (err, req, res, next) => {
-  console.error('❌ Payment Error:', err);
+  console.error('\n❌❌❌ PAYMENT ERROR HANDLER TRIGGERED');
+  console.error('Error:', err);
+  console.error('Stack:', err.stack);
   
   res.status(err.status || 500).json({
     success: false,
@@ -547,8 +974,11 @@ module.exports = {
   // Database middleware
   updatePaymentStatus,
   
-  // Manual update (admin)
+  // Additional utilities
+  checkPaymentStatus,
   manualPaymentUpdate,
+  forceUpdatePayment,
+  debugWebhook,
   
   // Error handler
   paymentErrorHandler
