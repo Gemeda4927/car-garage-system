@@ -15,8 +15,11 @@ const {
   verifyChapaPayment,
   verifyWebhookSignature,
   updatePaymentStatus,
-  checkPaymentStatus,  // ADD THIS - new function
-  manualPaymentUpdate, // ADD THIS - for testing
+  checkPaymentStatus,
+  manualPaymentUpdate,
+  forceUpdatePayment,
+  debugWebhook,
+  testWebhook,  // ADD THIS - new test endpoint
   paymentErrorHandler
 } = require('../middleware/payment.middleware');
 
@@ -42,7 +45,7 @@ router.post(
   initializeChapaPayment,
   async (req, res) => {
     try {
-      // Transaction already saved in middleware, just return response
+      console.log('✅ Payment initialization complete, returning response');
       res.json({
         success: true,
         message: 'Payment initialized successfully',
@@ -80,6 +83,7 @@ router.get(
   async (req, res) => {
     try {
       const { tx_ref } = req.params;
+      console.log('🔍 Verification completed for tx_ref:', tx_ref);
       
       // Find user by tx_ref
       const user = await User.findOne({ 'garageInfo.paymentTxRef': tx_ref });
@@ -90,7 +94,8 @@ router.get(
           verified: req.verificationResult?.success || false,
           paymentDetails: req.verificationResult?.data || null,
           userStatus: user?.garageInfo?.verificationStatus || 'unknown',
-          paymentStatus: user?.garageInfo?.paymentStatus || 'unknown'
+          paymentStatus: user?.garageInfo?.paymentStatus || 'unknown',
+          tx_ref: tx_ref
         }
       });
     } catch (error) {
@@ -105,29 +110,44 @@ router.get(
 );
 
 // ============================================================================
-// PAYMENT CALLBACK (CHAPA Webhook) - FIXED VERSION
+// PAYMENT CALLBACK (CHAPA Webhook)
 // ============================================================================
 
 /**
  * @route   POST /api/v1/payments/callback
  * @desc    CHAPA payment callback webhook
  * @access  Public (called by CHAPA)
- * 
- * IMPORTANT: This endpoint must:
- * 1. Return 200 OK as fast as possible
- * 2. Update database based on payment status
- * 3. Handle duplicate webhooks gracefully
  */
 router.post(
   '/callback',
-  verifyWebhookSignature,           // Verify it's from Chapa
-  updatePaymentStatus               // This now handles the response
+  verifyWebhookSignature,
+  updatePaymentStatus
 );
 
-// No additional code here - updatePaymentStatus sends the response
+// ============================================================================
+// TEST WEBHOOK ENDPOINT (FOR DEBUGGING)
+// ============================================================================
+
+/**
+ * @route   POST /api/v1/payments/test-webhook
+ * @desc    Test webhook endpoint - logs everything but doesn't update DB
+ * @access  Public (FOR TESTING ONLY)
+ */
+router.post('/test-webhook', testWebhook);
 
 // ============================================================================
-// GET PAYMENT STATUS - UPDATED
+// DEBUG WEBHOOK (SIMULATES CHAPA CALLBACK)
+// ============================================================================
+
+/**
+ * @route   POST /api/v1/payments/debug-webhook
+ * @desc    Debug webhook - simulates Chapa callback and updates DB
+ * @access  Public (FOR TESTING ONLY)
+ */
+router.post('/debug-webhook', debugWebhook);
+
+// ============================================================================
+// GET PAYMENT STATUS
 // ============================================================================
 
 /**
@@ -135,14 +155,21 @@ router.post(
  * @desc    Get current user payment status
  * @access  Private
  */
-router.get(
-  '/status',
-  protect,
-  checkPaymentStatus                // Using the dedicated middleware
-);
+router.get('/status', protect, checkPaymentStatus);
 
 // ============================================================================
-// MANUAL PAYMENT UPDATE (FOR TESTING/ADMIN)
+// FORCE UPDATE PAYMENT (EMERGENCY USE ONLY)
+// ============================================================================
+
+/**
+ * @route   POST /api/v1/payments/force-update
+ * @desc    Force update payment status by tx_ref
+ * @access  Public (FOR TESTING/EMERGENCY ONLY)
+ */
+router.post('/force-update', forceUpdatePayment);
+
+// ============================================================================
+// MANUAL PAYMENT UPDATE (ADMIN ONLY)
 // ============================================================================
 
 /**
@@ -153,7 +180,7 @@ router.get(
 router.post(
   '/manual-update',
   protect,
-  authorize('admin'),               // Only admins can do this
+  authorize('admin'),
   manualPaymentUpdate
 );
 
@@ -162,17 +189,19 @@ router.post(
 // ============================================================================
 
 /**
- * @route   POST /api/v1/payments/force-update
+ * @route   POST /api/v1/payments/force-update-user
  * @desc    Force update payment status for current user (TEMPORARY)
  * @access  Private (Garage Owner) - REMOVE AFTER TESTING
  */
 router.post(
-  '/force-update',
+  '/force-update-user',
   protect,
   authorize('garage_owner'),
   async (req, res) => {
     try {
       const { status = 'paid' } = req.body;
+      
+      console.log('🔧 FORCE UPDATE USER triggered for user:', req.user.id);
       
       const user = await User.findById(req.user.id);
       
@@ -182,6 +211,11 @@ router.post(
           message: 'User not found'
         });
       }
+      
+      console.log('✅ User found:', { 
+        email: user.email, 
+        currentStatus: user.garageInfo?.paymentStatus 
+      });
       
       // Force update
       user.garageInfo.paymentStatus = status;
@@ -195,7 +229,11 @@ router.post(
       
       await user.save();
       
-      console.log('✅ FORCE UPDATE applied for user:', user.email);
+      console.log('✅✅✅ FORCE UPDATE applied for user:', user.email);
+      console.log('New status:', {
+        paymentStatus: user.garageInfo.paymentStatus,
+        verificationStatus: user.garageInfo.verificationStatus
+      });
       
       res.json({
         success: true,
@@ -228,6 +266,8 @@ router.post(
  * @access  Public
  */
 router.get('/plans', (req, res) => {
+  console.log('📋 Fetching payment plans');
+  
   const plans = [
     {
       id: 'basic',
@@ -280,68 +320,34 @@ router.get('/plans', (req, res) => {
 });
 
 // ============================================================================
-// WEBHOOK DEBUG ENDPOINT (TEMPORARY)
+// HEALTH CHECK ENDPOINT
 // ============================================================================
 
 /**
- * @route   POST /api/v1/payments/debug-webhook
- * @desc    Debug webhook - simulates Chapa callback
- * @access  Public (TEMPORARY - REMOVE AFTER TESTING)
+ * @route   GET /api/v1/payments/health
+ * @desc    Health check endpoint
+ * @access  Public
  */
-router.post('/debug-webhook', async (req, res) => {
-  try {
-    const { tx_ref, status = 'success' } = req.body;
-    
-    if (!tx_ref) {
-      return res.status(400).json({
-        success: false,
-        message: 'tx_ref is required'
-      });
-    }
-    
-    console.log('🔧 DEBUG WEBHOOK CALLED with:', { tx_ref, status });
-    
-    // Find user
-    const user = await User.findOne({ 'garageInfo.paymentTxRef': tx_ref });
-    
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'User not found for this tx_ref'
-      });
-    }
-    
-    console.log('✅ Debug: User found:', user.email);
-    
-    // Update database
-    if (status === 'success') {
-      user.garageInfo.paymentStatus = 'paid';
-      user.garageInfo.paymentDate = new Date();
-      user.garageInfo.paymentExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
-      user.garageInfo.verificationStatus = 'payment_completed';
-      user.garageInfo.verificationProgress.paymentCompleted = true;
-      
-      await user.save();
-      
-      console.log('✅✅✅ DEBUG: Database updated to PAID');
-    }
-    
-    res.json({
-      success: true,
-      message: 'Debug webhook processed',
-      data: {
-        user: user.email,
-        paymentStatus: user.garageInfo.paymentStatus,
-        verificationStatus: user.garageInfo.verificationStatus
-      }
-    });
-  } catch (error) {
-    console.error('❌ Debug webhook error:', error);
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
-  }
+router.get('/health', (req, res) => {
+  console.log('💓 Health check requested');
+  res.json({
+    success: true,
+    message: 'Payment service is healthy',
+    timestamp: new Date().toISOString(),
+    endpoints: [
+      '/initialize',
+      '/verify/:tx_ref',
+      '/callback',
+      '/test-webhook',
+      '/debug-webhook',
+      '/status',
+      '/force-update',
+      '/manual-update',
+      '/force-update-user',
+      '/plans',
+      '/health'
+    ]
+  });
 });
 
 // ============================================================================
