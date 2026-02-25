@@ -427,6 +427,7 @@ const userSchema = new mongoose.Schema({
     required: [true, 'Email is required'], 
     lowercase: true, 
     trim: true,
+    unique: true,
     match: [/^\w+([\.-]?\w+)*@\w+([\.-]?\w+)*(\.\w{2,3})+$/, 'Please provide a valid email']
   },
   password: { 
@@ -526,6 +527,32 @@ userSchema.index({ 'garageInfo.isFeatured': 1 });
 userSchema.index({ 'garageInfo.subscriptionExpiry': 1 });
 userSchema.index({ 'garageInfo.businessEmail': 1 });
 userSchema.index({ 'garageInfo.licenseNumber': 1 });
+
+// ============================================================================
+// PRE-SAVE HOOK - Hash password before saving
+// ============================================================================
+userSchema.pre('save', async function(next) {
+  // Only hash the password if it has been modified (or is new)
+  if (!this.isModified('password')) {
+    return next();
+  }
+  
+  try {
+    console.log('🔐 Hashing password for user:', this.email);
+    
+    // Generate salt
+    const salt = await bcrypt.genSalt(10);
+    
+    // Hash password
+    this.password = await bcrypt.hash(this.password, salt);
+    
+    console.log('✅ Password hashed successfully');
+    next();
+  } catch (error) {
+    console.error('❌ Error hashing password:', error);
+    next(error);
+  }
+});
 
 // ============================================================================
 // METHODS
