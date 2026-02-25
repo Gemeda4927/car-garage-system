@@ -1221,10 +1221,6 @@ const login = async (req, res) => {
       return sendErrorResponse(res, 401, 'Your account has been deactivated. Please contact support.');
     }
 
-    // Update last login
-    user.lastLogin = new Date();
-    await user.save();
-    console.log('✅ Last login updated');
 
     const token = generateToken(user);
 
