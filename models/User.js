@@ -305,7 +305,8 @@ const garageOwnerInfoSchema = new mongoose.Schema({
       'approved',
       'rejected',
       'suspended',
-      'banned'
+      'banned',
+      'payment_completed'
     ],
     default: 'pending'
   },
